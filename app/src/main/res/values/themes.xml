@@ -1,4 +1,17 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <style name="Theme.MidiManipulator" parent="android:Theme.Material.NoTitleBar.Fullscreen" />
+    <!--
+        The manifest-level theme only needs to suppress the default ActionBar
+        and not clash with AAPT resource linking.  Jetpack Compose + Material3
+        overrides all visual styling inside setContent{}, so no further tokens
+        are needed here.
+
+        android:Theme.Material.NoTitleBar.Fullscreen was removed from the
+        framework res package visible to AAPT at compileSdk >= 34 and caused:
+          ERROR: AAPT: error: resource android:style/Theme.Material.NoTitleBar.Fullscreen not found.
+
+        Theme.AppCompat.NoActionBar is always available via the appcompat
+        dependency and resolves correctly at all API levels.
+    -->
+    <style name="Theme.MidiManipulator" parent="Theme.AppCompat.NoActionBar" />
 </resources>
