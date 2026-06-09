@@ -1,20 +1,26 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
+    <!-- MIDI feature -->
+    <uses-feature android:name="android.software.midi" android:required="false" />
+
+    <!-- BLE MIDI -->
+    <uses-feature android:name="android.hardware.bluetooth_le" android:required="false" />
+    <uses-permission android:name="android.permission.BLUETOOTH" android:maxSdkVersion="30" />
+    <uses-permission android:name="android.permission.BLUETOOTH_ADMIN" android:maxSdkVersion="30" />
     <uses-permission android:name="android.permission.BLUETOOTH_SCAN"
         android:usesPermissionFlags="neverForLocation" />
     <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
-    <uses-permission android:name="android.permission.RECORD_AUDIO" />
-    <uses-permission android:name="android.permission.BLUETOOTH"
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION"
         android:maxSdkVersion="30" />
 
-    <uses-feature android:name="android.software.midi" android:required="false" />
-    <uses-feature android:name="android.hardware.bluetooth_le" android:required="false" />
+    <!-- For future audio analysis -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
 
     <application
         android:allowBackup="true"
-        android:icon="@mipmap/ic_launcher"
         android:label="@string/app_name"
+        android:icon="@mipmap/ic_launcher"
         android:roundIcon="@mipmap/ic_launcher_round"
         android:supportsRtl="true"
         android:theme="@style/Theme.MidiManipulator">
@@ -22,25 +28,27 @@
         <activity
             android:name=".MainActivity"
             android:exported="true"
-            android:configChanges="orientation|screenSize|keyboardHidden">
+            android:configChanges="orientation|screenSize|keyboardHidden"
+            android:windowSoftInputMode="adjustResize">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
 
-        <!-- Virtual MIDI Service -->
+        <!-- Virtual MIDI device service -->
         <service
-            android:name=".midi.VirtualMidiService"
-            android:exported="true"
-            android:permission="android.permission.BIND_MIDI_DEVICE_SERVICE">
+            android:name=".service.VirtualMidiService"
+            android:permission="android.permission.BIND_MIDI_DEVICE_SERVICE"
+            android:exported="true">
             <intent-filter>
                 <action android:name="android.media.midi.MidiDeviceService" />
             </intent-filter>
             <meta-data
                 android:name="android.media.midi"
-                android:resource="@xml/midi_device_info" />
+                android:resource="@xml/virtual_device_info" />
         </service>
 
     </application>
+
 </manifest>

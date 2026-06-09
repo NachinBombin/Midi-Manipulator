@@ -1,26 +1,34 @@
 package com.nachinbombin.midimanipulator.theme
 
 import android.content.Context
-import androidx.core.content.edit
+import android.content.SharedPreferences
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 
-class ThemeManager(private val context: Context) {
+class ThemeManager(context: Context) {
 
-    companion object {
-        private const val PREFS_NAME = "midi_manipulator_prefs"
-        private const val KEY_THEME_ID = "theme_id"
-    }
+    private val prefs: SharedPreferences =
+        context.getSharedPreferences("midi_perf_prefs", Context.MODE_PRIVATE)
 
-    private val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-
-    private val _currentTheme = MutableStateFlow(
-        ThemePresets.all[prefs.getInt(KEY_THEME_ID, 0)]
-    )
+    private val _currentTheme = MutableStateFlow(loadTheme())
     val currentTheme: StateFlow<ThemePreset> = _currentTheme
 
-    fun setTheme(preset: ThemePreset) {
-        _currentTheme.value = preset
-        prefs.edit { putInt(KEY_THEME_ID, preset.id) }
+    private val _currentThemeName = MutableStateFlow(_currentTheme.value.name)
+    val currentThemeName: StateFlow<String> = _currentThemeName
+
+    fun setTheme(name: String) {
+        val preset = ThemePresets.all.firstOrNull { it.name == name } ?: ThemePresets.Default
+        prefs.edit().putString(PREF_THEME, name).apply()
+        _currentTheme.value  = preset
+        _currentThemeName.value = preset.name
+    }
+
+    private fun loadTheme(): ThemePreset {
+        val saved = prefs.getString(PREF_THEME, ThemePresets.Default.name)
+        return ThemePresets.all.firstOrNull { it.name == saved } ?: ThemePresets.Default
+    }
+
+    companion object {
+        private const val PREF_THEME = "selected_theme"
     }
 }

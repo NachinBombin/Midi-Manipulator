@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<devices>
+    <device manufacturer="NachinBombin" product="MIDI Performance">
+        <input-port name="Perf In" />
+        <output-port name="Perf Out" />
+    </device>
+</devices>
