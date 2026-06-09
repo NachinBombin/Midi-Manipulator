@@ -5,48 +5,43 @@ plugins {
 }
 
 android {
-    namespace = "com.nachinbombin.midimanipulator"
-    compileSdk = 35
+    namespace   = "com.nachinbombin.midimanipulator"
+    compileSdk  = 35
 
     defaultConfig {
-        applicationId = "com.nachinbombin.midimanipulator"
-        minSdk = 26
-        targetSdk = 35
-        versionCode = 1
-        versionName = "1.0"
+        applicationId          = "com.nachinbombin.midimanipulator"
+        minSdk                 = 26
+        targetSdk              = 35
+        versionCode            = 1
+        versionName            = "1.0"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
-        externalNativeBuild {
-            cmake {
-                cppFlags += "-std=c++17"
-            }
-        }
+        // NDK / CMake block intentionally omitted until cpp sources exist.
+        // Re-add externalNativeBuild once src/main/cpp/CMakeLists.txt is present.
     }
 
     buildTypes {
         release {
             isMinifyEnabled = true
-            proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
+            proguardFiles(
+                getDefaultProguardFile("proguard-android-optimize.txt"),
+                "proguard-rules.pro"
+            )
         }
     }
+
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
     }
-    // Replaced deprecated kotlinOptions with compilerOptions
+
     kotlin {
         compilerOptions {
             jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17)
         }
     }
+
     buildFeatures {
         compose = true
-    }
-    externalNativeBuild {
-        cmake {
-            // path must be a File, not a String literal
-            path = file("src/main/cpp/CMakeLists.txt")
-            version = "3.22.1"
-        }
     }
 }
 
