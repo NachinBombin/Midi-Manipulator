@@ -32,15 +32,19 @@ android {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
     }
-    kotlinOptions {
-        jvmTarget = "17"
+    // Replaced deprecated kotlinOptions with compilerOptions
+    kotlin {
+        compilerOptions {
+            jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17)
+        }
     }
     buildFeatures {
         compose = true
     }
     externalNativeBuild {
         cmake {
-            path = "src/main/cpp/CMakeLists.txt"
+            // path must be a File, not a String literal
+            path = file("src/main/cpp/CMakeLists.txt")
             version = "3.22.1"
         }
     }
