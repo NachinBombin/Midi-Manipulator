@@ -1,130 +1,191 @@
 package com.nachinbombin.midimanipulator.ui.component
 
-import android.os.Handler
-import android.os.Looper
-import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.*
 import androidx.compose.foundation.Canvas
-import androidx.compose.foundation.background
-import androidx.compose.foundation.border
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material3.Text
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.input.pointer.pointerInput
-import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
-import com.nachinbombin.midimanipulator.midi.MidiEngine
-import com.nachinbombin.midimanipulator.theme.ThemePreset
+import androidx.compose.ui.geometry.*
+import androidx.compose.ui.graphics.*
+import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.input.pointer.*
+import androidx.compose.ui.text.*
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.*
 import kotlin.math.abs
+import kotlin.math.roundToInt
 
 @Composable
 fun StrumStrip(
     label: String,
-    chordNotes: List<Int>,
-    theme: ThemePreset,
+    noteCount: Int,         // ticks in the strip (e.g. 12 for 3 octaves × 4 notes)
+    accent: Color,
+    accentSoft: Color,
+    bg: Color,
+    elevated: Color,
+    textPrimary: Color,
+    textMuted: Color,
     locked: Boolean,
     onLockToggle: () -> Unit,
-    midiEngine: MidiEngine,
+    onNoteOn:  (noteIndex: Int, velocity: Int) -> Unit,
+    onNoteOff: (noteIndex: Int) -> Unit,
     modifier: Modifier = Modifier
 ) {
-    val activeNotes = remember { mutableSetOf<Int>() }
-    val lockColor by animateColorAsState(
-        targetValue = if (locked) Color(0xFFFF4444) else Color(theme.textMuted.value)
+    var lastX by remember { mutableStateOf(-1f) }
+    var activeIndex by remember { mutableStateOf(-1) }
+    var rippleX by remember { mutableStateOf(0f) }
+    var rippleAlpha by remember { mutableStateOf(0f) }
+    val rippleAnim = remember { Animatable(0f) }
+
+    // Glow when active
+    val glowAlpha by animateFloatAsState(
+        targetValue = if (activeIndex >= 0) 0.55f else if (locked) 0.3f else 0f,
+        animationSpec = tween(200), label = "sg"
     )
-    val handler = remember { Handler(Looper.getMainLooper()) }
 
-    Row(
-        modifier = modifier
-            .fillMaxWidth()
-            .height(44.dp)
-            .background(Color(theme.bgElevated.value), RoundedCornerShape(8.dp))
-            .border(1.dp, Color(theme.borderSubtle.value), RoundedCornerShape(8.dp)),
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        // Lock toggle
-        Box(
-            modifier = Modifier
-                .size(36.dp)
-                .pointerInput(Unit) { detectTapGestures { onLockToggle() } },
-            contentAlignment = Alignment.Center
-        ) {
-            Text("🔒", fontSize = 14.sp, color = lockColor)
-        }
+    val textMeasurer = rememberTextMeasurer()
 
-        Text(
-            label,
-            color    = Color(theme.textMuted.value),
-            fontSize = 10.sp,
-            modifier = Modifier.width(44.dp)
-        )
+    suspend fun triggerRipple(x: Float) {
+        rippleX = x
+        rippleAnim.snapTo(0f)
+        rippleAnim.animateTo(1f, tween(380, easing = FastOutSlowInEasing))
+    }
 
-        // Strum canvas
+    LaunchedEffect(activeIndex) {
+        if (activeIndex >= 0) triggerRipple(rippleX)
+    }
+
+    Column(modifier = modifier) {
         Canvas(
             modifier = Modifier
-                .weight(1f)
-                .fillMaxHeight()
+                .fillMaxWidth()
+                .height(52.dp)
                 .pointerInput(locked) {
-                    if (!locked) {
-                        detectDragGestures(
-                            onDragEnd = {
-                                activeNotes.forEach { note ->
-                                    midiEngine.sendNoteOff(note, midiEngine.harmonyChannel)
-                                }
-                                activeNotes.clear()
-                            },
-                            onDrag = { change, dragAmount ->
-                                change.consume()
-                                if (chordNotes.isEmpty()) return@detectDragGestures
-                                val x         = change.position.x
-                                val totalW    = size.width.toFloat()
-                                val spacing   = totalW / chordNotes.size
-                                val noteIndex = (x / spacing).toInt().coerceIn(0, chordNotes.size - 1)
-                                val note      = chordNotes[noteIndex]
-                                if (!activeNotes.contains(note)) {
-                                    val swipeSpeed = abs(dragAmount.x)
-                                    val velocity   = (64 + (swipeSpeed * 1.5f).toInt()).coerceIn(40, 127)
-                                    // Overlap: Note On before previous Note Off
-                                    midiEngine.sendNoteOn(note, velocity, midiEngine.harmonyChannel)
-                                    activeNotes.add(note)
-                                    // Release previous note after 12ms
-                                    if (noteIndex > 0) {
-                                        val prev = chordNotes[noteIndex - 1]
-                                        if (activeNotes.contains(prev)) {
-                                            handler.postDelayed({
-                                                midiEngine.sendNoteOff(prev, midiEngine.harmonyChannel)
-                                                activeNotes.remove(prev)
-                                            }, 12L)
-                                        }
-                                    }
-                                }
+                    if (locked) return@pointerInput
+                    detectDragGestures(
+                        onDragStart = { off ->
+                            lastX = off.x
+                            rippleX = off.x
+                        },
+                        onDragEnd    = {
+                            if (activeIndex >= 0) onNoteOff(activeIndex)
+                            activeIndex = -1; lastX = -1f
+                        },
+                        onDragCancel = {
+                            if (activeIndex >= 0) onNoteOff(activeIndex)
+                            activeIndex = -1; lastX = -1f
+                        },
+                        onDrag = { change, _ ->
+                            change.consume()
+                            val w = size.width
+                            val pct = (change.position.x / w).coerceIn(0f, 1f)
+                            val idx = (pct * noteCount).toInt().coerceIn(0, noteCount - 1)
+                            val swipeVel = if (lastX >= 0f)
+                                abs(change.position.x - lastX).coerceAtMost(120f) / 120f
+                            else 0.5f
+                            val vel = (40 + swipeVel * 87f).roundToInt()
+                            if (idx != activeIndex) {
+                                if (activeIndex >= 0) onNoteOff(activeIndex)
+                                onNoteOn(idx, vel)
+                                activeIndex = idx
+                                rippleX = change.position.x
                             }
-                        )
-                    }
+                            lastX = change.position.x
+                        }
+                    )
+                }
+                .pointerInput(locked) {
+                    if (locked) return@pointerInput
+                    detectTapGestures(
+                        onTap = { off ->
+                            val pct = (off.x / size.width).coerceIn(0f, 1f)
+                            val idx = (pct * noteCount).toInt().coerceIn(0, noteCount - 1)
+                            onNoteOn(idx, 80)
+                            onNoteOff(idx)
+                        }
+                    )
                 }
         ) {
-            if (chordNotes.isEmpty()) return@Canvas
-            val spacing = size.width / chordNotes.size
-            chordNotes.forEachIndexed { i, note ->
-                val x      = i * spacing + spacing / 2f
-                val active = activeNotes.contains(note)
-                drawLine(
-                    color       = if (active) Color(theme.accent.value) else Color(theme.borderSubtle.value),
-                    start       = Offset(x, size.height * 0.2f),
-                    end         = Offset(x, size.height * 0.8f),
-                    strokeWidth = if (active) 3f else 1.5f
-                )
-                drawCircle(
-                    color  = if (active) Color(theme.accent.value) else Color(theme.borderSubtle.value),
-                    radius = if (active) 5f else 3.5f,
-                    center = Offset(x, size.height / 2f)
+            val w = size.width
+            val h = size.height
+            val tickW = w / noteCount
+
+            // ── Background gradient ─────────────────────────────────────────
+            drawRoundRect(
+                brush = Brush.verticalGradient(
+                    colors = listOf(elevated.copy(alpha = 0.9f), bg)
+                ),
+                cornerRadius = CornerRadius(10f)
+            )
+
+            // ── Glow wash over active zone ──────────────────────────────────
+            if (glowAlpha > 0f) {
+                val glowX = if (activeIndex >= 0) (activeIndex + 0.5f) * tickW else rippleX
+                drawRect(
+                    brush = Brush.horizontalGradient(
+                        colors = listOf(
+                            Color.Transparent,
+                            accent.copy(alpha = glowAlpha * 0.4f),
+                            accentSoft.copy(alpha = glowAlpha * 0.55f),
+                            accent.copy(alpha = glowAlpha * 0.4f),
+                            Color.Transparent
+                        ),
+                        startX = glowX - w * 0.25f,
+                        endX   = glowX + w * 0.25f
+                    )
                 )
             }
+
+            // ── Ripple circle ───────────────────────────────────────────────
+            val rp = rippleAnim.value
+            if (rp > 0f && rp < 1f) {
+                drawCircle(
+                    color  = accent.copy(alpha = (1f - rp) * 0.55f),
+                    radius = rp * w * 0.38f,
+                    center = Offset(rippleX, h / 2f)
+                )
+            }
+
+            // ── Tick marks ─────────────────────────────────────────────────
+            for (i in 0 until noteCount) {
+                val tx = (i + 0.5f) * tickW
+                val isActive = i == activeIndex
+                // Tall tick for octave boundaries
+                val isOctave = i % (noteCount / 3) == 0
+                val tickH = when {
+                    isActive -> h * 0.78f
+                    isOctave -> h * 0.52f
+                    else     -> h * 0.35f
+                }
+                // Glow behind active tick
+                if (isActive) {
+                    drawLine(
+                        brush = Brush.verticalGradient(
+                            colors = listOf(Color.Transparent, accent.copy(0.6f), Color.Transparent),
+                            startY = (h - tickH) / 2f, endY = (h + tickH) / 2f
+                        ),
+                        start       = Offset(tx, (h - tickH) / 2f),
+                        end         = Offset(tx, (h + tickH) / 2f),
+                        strokeWidth = 5f
+                    )
+                }
+                drawLine(
+                    color       = if (isActive) accentSoft else if (isOctave) textMuted.copy(0.6f) else textMuted.copy(0.25f),
+                    start       = Offset(tx, (h - tickH) / 2f),
+                    end         = Offset(tx, (h + tickH) / 2f),
+                    strokeWidth = if (isActive) 2.5f else if (isOctave) 1.8f else 1f
+                )
+            }
+
+            // ── Border ─────────────────────────────────────────────────────
+            drawRoundRect(
+                color        = if (locked) Color(0xFFFF4466).copy(0.6f) else accent.copy(if (activeIndex >= 0) 0.5f else 0.15f),
+                cornerRadius = CornerRadius(10f),
+                style        = Stroke(width = 1.8f)
+            )
         }
     }
 }
