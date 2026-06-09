@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">MIDI Manipulator</string>
+    <string name="nav_performance">Performance</string>
+    <string name="nav_routing">MIDI Routing</string>
+    <string name="nav_gamepad">Gamepad</string>
+    <string name="nav_settings">Settings</string>
+</resources>

@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<devices>
+    <device manufacturer="NachinBombin" product="MidiManipulator">
+        <input-port name="MIDI Manipulator In" />
+        <output-port name="MIDI Manipulator Out" />
+    </device>
+</devices>
