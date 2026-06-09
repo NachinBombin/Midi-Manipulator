@@ -15,7 +15,8 @@ data class MidiPortInfo(
     val deviceId: Int,
     val portIndex: Int,
     val name: String,
-    val isInput: Boolean  // true = device input port (app writes to it); false = device output port (app reads from it)
+    /** true = device input port (app writes to it); false = device output port (app reads from it) */
+    val isInput: Boolean
 )
 
 class MidiManager(private val context: Context) {
@@ -32,37 +33,35 @@ class MidiManager(private val context: Context) {
     val activityLog: StateFlow<List<String>> = _activityLog
 
     private var connectedOutputPort: MidiOutputPort? = null  // device output port → we read from this
-    private var connectedInputPort: MidiInputPort? = null    // device input port  → we write to this
+    private var connectedInputPort: MidiInputPort?  = null   // device input port  → we write to this
 
     private val handler = Handler(Looper.getMainLooper())
+
+    private val deviceCallback = object : android.media.midi.MidiManager.DeviceCallback() {
+        override fun onDeviceAdded(device: MidiDeviceInfo)   { refreshDevices() }
+        override fun onDeviceRemoved(device: MidiDeviceInfo) { refreshDevices() }
+    }
 
     fun initialize() {
         // Wire engine output to the connected device input port
         engine.outputSender = { bytes ->
-            try { connectedInputPort?.send(bytes, 0, bytes.size) } catch (e: Exception) { /* ignore */ }
+            try { connectedInputPort?.send(bytes, 0, bytes.size) } catch (_: Exception) { }
         }
-        // FIX: VirtualMidiService.engineRef was never set — set it here so virtual port works
+        // Set engineRef for virtual inter-app port
         VirtualMidiService.engineRef = engine
 
         refreshDevices()
-        systemMidiManager.registerDeviceCallback(
-            object : android.media.midi.MidiManager.DeviceCallback() {
-                override fun onDeviceAdded(device: MidiDeviceInfo)   { refreshDevices() }
-                override fun onDeviceRemoved(device: MidiDeviceInfo) { refreshDevices() }
-            }, handler
-        )
+        systemMidiManager.registerDeviceCallback(deviceCallback, handler)
     }
 
     fun refreshDevices() {
-        val devices = systemMidiManager.devices
+        val devices  = systemMidiManager.devices
         val portList = mutableListOf<MidiPortInfo>()
         devices.forEach { info ->
             val name = info.properties.getString(MidiDeviceInfo.PROPERTY_NAME) ?: "Unknown"
-            // input ports = ports the app can WRITE to (isInput = true for our model)
-            repeat(info.inputPortCount) { i ->
-                portList.add(MidiPortInfo(info.id, i, "$name (In $i)", isInput = true))
+            repeat(info.inputPortCount)  { i ->
+                portList.add(MidiPortInfo(info.id, i, "$name (In $i)",  isInput = true))
             }
-            // output ports = ports the app can READ from (isInput = false for our model)
             repeat(info.outputPortCount) { i ->
                 portList.add(MidiPortInfo(info.id, i, "$name (Out $i)", isInput = false))
             }
@@ -81,22 +80,23 @@ class MidiManager(private val context: Context) {
             outputPort.connect(object : MidiReceiver() {
                 override fun onSend(msg: ByteArray, offset: Int, count: Int, timestamp: Long) {
                     if (count >= 3) {
-                        val status    = msg[offset].toInt() and 0xFF
-                        val note      = msg[offset + 1].toInt() and 0xFF
-                        val vel       = msg[offset + 2].toInt() and 0xFF
+                        val status   = msg[offset].toInt() and 0xFF
+                        val note     = msg[offset + 1].toInt() and 0xFF
+                        val vel      = msg[offset + 2].toInt() and 0xFF
                         val isNoteOn  = (status and 0xF0) == 0x90 && vel > 0
-                        val isNoteOff = (status and 0xF0) == 0x80 || ((status and 0xF0) == 0x90 && vel == 0)
-                        if (isNoteOn || isNoteOff) {
-                            engine.onIncomingNote(note, vel, isNoteOn)
-                        }
-                        logActivity("Ch${(status and 0x0F) + 1} ${if (isNoteOn) "ON" else "OFF"} note=$note vel=$vel")
+                        val isNoteOff = (status and 0xF0) == 0x80 ||
+                                        ((status and 0xF0) == 0x90 && vel == 0)
+                        if (isNoteOn || isNoteOff) engine.onIncomingNote(note, vel, isNoteOn)
+                        logActivity("Ch${(status and 0x0F) + 1} " +
+                            "${if (isNoteOn) "ON" else "OFF"} note=$note vel=$vel")
                     }
                 }
             })
+            logActivity("Input connected: ${portInfo.name}")
         }, handler)
     }
 
-    /** FIX: was called in RoutingScreen but never defined. Opens a device input port to send MIDI to it. */
+    /** Open a device input port to send MIDI to it (e.g. to a synth). */
     fun connectOutput(portInfo: MidiPortInfo) {
         val device = systemMidiManager.devices.firstOrNull { it.id == portInfo.deviceId } ?: return
         systemMidiManager.openDevice(device, { midiDevice ->
@@ -104,14 +104,28 @@ class MidiManager(private val context: Context) {
             connectedInputPort?.close()
             val inputPort = midiDevice.openInputPort(portInfo.portIndex) ?: return@openDevice
             connectedInputPort = inputPort
+            // Rewire engine sender to newly connected port
+            engine.outputSender = { bytes ->
+                try { connectedInputPort?.send(bytes, 0, bytes.size) } catch (_: Exception) { }
+            }
             logActivity("Output connected: ${portInfo.name}")
         }, handler)
+    }
+
+    /** Clean up all open ports and stop device callbacks. Called from Activity.onDestroy(). */
+    fun release() {
+        engine.allNotesOff()
+        try { connectedOutputPort?.close() } catch (_: Exception) { }
+        try { connectedInputPort?.close()  } catch (_: Exception) { }
+        connectedOutputPort = null
+        connectedInputPort  = null
+        systemMidiManager.unregisterDeviceCallback(deviceCallback)
+        VirtualMidiService.engineRef = null
     }
 
     private fun logActivity(msg: String) {
         val ts = java.text.SimpleDateFormat("HH:mm:ss.SSS", java.util.Locale.getDefault())
             .format(java.util.Date())
-        val entry = "[$ts] $msg"
-        _activityLog.value = (listOf(entry) + _activityLog.value).take(200)
+        _activityLog.value = (listOf("[$ts] $msg") + _activityLog.value).take(200)
     }
 }

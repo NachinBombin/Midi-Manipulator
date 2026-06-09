@@ -6,9 +6,9 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlin.math.abs
 
 data class MidiAnalysis(
-    val lastNote: Int = -1,
+    val lastNote: Int     = -1,
     val lastNoteName: String = "\u2014",
-    val rootNote: Int = -1,
+    val rootNote: Int     = -1,
     val rootNoteName: String = "\u2014",
     val scaleName: String = "\u2014",
     val chordContext: String = "\u2014"
@@ -21,123 +21,135 @@ class MidiEngine(private val context: Context) {
         private const val NOTE_ON  = 0x90
         private const val NOTE_OFF = 0x80
 
-        private val NOTE_NAMES = arrayOf(
-            "C","C#","D","D#","E","F","F#","G","G#","A","A#","B"
+        val NOTE_NAMES = arrayOf(
+            "C", "C#", "D", "D#", "E", "F",
+            "F#", "G", "G#", "A", "A#", "B"
         )
 
         fun noteName(note: Int): String {
             if (note < 0) return "\u2014"
-            val pc = note % 12
-            val octave = note / 12 - 1
-            return "${NOTE_NAMES[pc]}$octave"
+            return "${NOTE_NAMES[note % 12]}${note / 12 - 1}"
         }
+
+        /** Chord voicing intervals per strum strip (matches STRUM_LABELS in PerformanceScreen) */
+        val STRUM_CHORD_TYPES = listOf("Major", "Triad", "7th", "9th", "sus2", "sus4")
     }
+
+    // ─── Public state ────────────────────────────────────────────────────────
 
     private val _analysis = MutableStateFlow(MidiAnalysis())
     val analysis: StateFlow<MidiAnalysis> = _analysis
 
+    /** Channel (0-based) used for all generated harmony/chord/joystick voices. */
+    var harmonyChannel: Int = 1
+
+    /** Set by MidiManager so the engine can send bytes to the selected output port. */
+    var outputSender: ((ByteArray) -> Unit)? = null
+
+    // ─── Engine state ────────────────────────────────────────────────────────
+
     private val noteBuffer = ArrayDeque<Pair<Long, Int>>()
 
-    // Track active generated harmony notes so we stop exactly those notes
-    private var lastHarmonyNotes: List<Int> = emptyList()
-    // Track active joystick melody note
-    private var activeJoystickNote: Int = -1
-    // Track active chord notes from joystick 2
-    private var activeChordNotes: List<Int> = emptyList()
-    // Map strum stripIndex -> set of active note numbers so NoteOff hits the right notes
-    private val activeStrumNotes = mutableMapOf<Int, MutableSet<Int>>()
+    private var lastHarmonyNotes:   List<Int> = emptyList()
+    private var activeJoystickNote: Int        = -1
+    private var activeChordNotes:   List<Int>  = emptyList()
+    private val activeStrumNotes    = mutableMapOf<Int, MutableSet<Int>>()
 
-    var hardlockedNote: Int = -1
-        private set
-    var isHardlocked: Boolean = false
-        private set
+    var hardlockedNote: Int     = -1; private set
+    var isHardlocked:   Boolean = false; private set
 
-    /** Channel (0-based) used for all generated harmony/chord/joystick voices */
-    var harmonyChannel: Int = 1
+    // ─── CC properties (setters send MIDI immediately) ───────────────────────
 
     var portamentoTime: Int = 0
         set(value) {
-            field = value
-            sendCC(5, value.coerceIn(0, 127), harmonyChannel)
-            sendCC(65, if (value > 0) 127 else 0, harmonyChannel)
+            field = value.coerceIn(0, 127)
+            sendCC(5,  field, harmonyChannel)
+            sendCC(65, if (field > 0) 127 else 0, harmonyChannel)
         }
 
+    /**
+     * 14-bit pitch bend (0..16383, center = 8192).
+     * FIX: initial value was 0 — corrected to 8192 (center) so pitch starts neutral.
+     */
     var pitchBend: Int = 8192
         set(value) {
-            field = value
-            sendPitchBend(value, harmonyChannel)
+            field = value.coerceIn(0, 16383)
+            sendPitchBend(field, harmonyChannel)
         }
 
     var modValue: Int = 0
         set(value) {
-            field = value
-            sendCC(1, value.coerceIn(0, 127), harmonyChannel)
+            field = value.coerceIn(0, 127)
+            sendCC(1, field, harmonyChannel)
         }
 
-    /** Set by MidiManager so the engine can write bytes to the selected output port. */
-    var outputSender: ((ByteArray) -> Unit)? = null
-
     // ─────────────────────────────────────────────────────────────────────────
-    // Public API — called from outside
+    // Public API
     // ─────────────────────────────────────────────────────────────────────────
 
     fun onIncomingNote(noteNumber: Int, velocity: Int, isOn: Boolean) {
         val now = System.currentTimeMillis()
         if (isOn && velocity > 0) {
-            noteBuffer.addLast(Pair(now, noteNumber))
+            noteBuffer.addLast(now to noteNumber)
             pruneBuffer(now)
             reanalyze(noteNumber)
             val refNote = if (isHardlocked) hardlockedNote else noteNumber
             generateVoices(refNote, velocity)
         } else {
-            // FIX: stop harmony voices when the source note is released
             stopLastHarmonyNotes()
         }
     }
 
     fun hardlock(note: Int) {
         hardlockedNote = if (note >= 0) note else _analysis.value.lastNote
-        isHardlocked = hardlockedNote >= 0
+        isHardlocked   = hardlockedNote >= 0
     }
 
     fun unlock() {
-        isHardlocked = false
+        stopLastHarmonyNotes()
+        isHardlocked   = false
         hardlockedNote = -1
     }
 
-    // ─── Strum helpers ────────────────────────────────────────────────────────
+    /** Sends Note-Off for every currently tracked generated note — panic / clean shutdown. */
+    fun allNotesOff() {
+        stopLastHarmonyNotes()
+        joystickMelodyRelease()
+        joystickChordRelease()
+        activeStrumNotes.keys.toList().forEach { releaseStrumStrip(it) }
+        // Broadcast All-Notes-Off CC (CC 123) on all used channels
+        for (ch in 0..15) sendCC(123, 0, ch)
+    }
+
+    // ─── Strum strips ─────────────────────────────────────────────────────────
 
     /**
-     * FIX: was passing noteIndex raw as MIDI note number.
-     * Now computes the actual MIDI note from the chord root + interval across 3 octaves of
-     * the chord voicing. noteIndex 0..N-1 maps to chord tones ascending over 3 octaves.
+     * Maps noteIndex across 3 octaves of the strip's chord voicing.
+     * noteIndex 0 = lowest chord tone, climbing through intervals then repeating +12 per octave.
      */
     fun strumNoteOn(stripIndex: Int, noteIndex: Int, velocity: Int) {
-        val root = if (isHardlocked) hardlockedNote else _analysis.value.lastNote
-        val baseRoot = if (root >= 0) root else 60  // default to middle C
+        val root      = effectiveRoot()
         val chordType = STRUM_CHORD_TYPES.getOrElse(stripIndex) { "Triad" }
-        val intervals = buildChordVoicing(baseRoot, chordType)
-        // Spread across 3 octaves: repeat the chord voicing, shifting up 12 each pass
-        val octave  = noteIndex / intervals.size
-        val degree  = noteIndex % intervals.size
-        val midiNote = (intervals.getOrElse(degree) { baseRoot } + octave * 12).coerceIn(0, 127)
+        val intervals = buildChordIntervals(chordType)
+        val degree    = noteIndex % intervals.size.coerceAtLeast(1)
+        val octave    = noteIndex / intervals.size.coerceAtLeast(1)
+        val midiNote  = (root + intervals.getOrElse(degree) { 0 } + octave * 12).coerceIn(0, 127)
         activeStrumNotes.getOrPut(stripIndex) { mutableSetOf() }.add(midiNote)
         sendNoteOn(midiNote, velocity, harmonyChannel)
     }
 
     fun strumNoteOff(stripIndex: Int, noteIndex: Int) {
-        val root = if (isHardlocked) hardlockedNote else _analysis.value.lastNote
-        val baseRoot = if (root >= 0) root else 60
+        val root      = effectiveRoot()
         val chordType = STRUM_CHORD_TYPES.getOrElse(stripIndex) { "Triad" }
-        val intervals = buildChordVoicing(baseRoot, chordType)
-        val octave   = noteIndex / intervals.size
-        val degree   = noteIndex % intervals.size
-        val midiNote = (intervals.getOrElse(degree) { baseRoot } + octave * 12).coerceIn(0, 127)
+        val intervals = buildChordIntervals(chordType)
+        val degree    = noteIndex % intervals.size.coerceAtLeast(1)
+        val octave    = noteIndex / intervals.size.coerceAtLeast(1)
+        val midiNote  = (root + intervals.getOrElse(degree) { 0 } + octave * 12).coerceIn(0, 127)
         sendNoteOff(midiNote, harmonyChannel)
         activeStrumNotes[stripIndex]?.remove(midiNote)
     }
 
-    /** Release all notes for a given strip (used when strip lock is toggled off). */
+    /** Send Note-Off for every note active on a strip (called when strip lock is removed). */
     fun releaseStrumStrip(stripIndex: Int) {
         activeStrumNotes[stripIndex]?.forEach { sendNoteOff(it, harmonyChannel) }
         activeStrumNotes[stripIndex]?.clear()
@@ -145,23 +157,20 @@ class MidiEngine(private val context: Context) {
 
     // ─── Joystick 1 — melodic single voice ────────────────────────────────────
 
-    /**
-     * FIX: note calculation was using root pitch-class addition which produced wrong octave.
-     * Now anchors to the reference note's octave and adds the scale interval offset directly.
-     */
     fun joystickMelodyUpdate(sectorDegree: Int, distance: Float) {
-        val refNote = if (isHardlocked) hardlockedNote else _analysis.value.lastNote
+        val refNote = effectiveRootNote()
         if (refNote < 0) return
 
-        val root      = _analysis.value.rootNote
+        val root      = _analysis.value.rootNote.takeIf { it >= 0 } ?: (refNote % 12)
         val scaleName = _analysis.value.scaleName
         val intervals = scaleIntervals(scaleName)
-        // Anchor octave to refNote; interval is semitones above root in same octave block
-        val rootInOctave = (refNote / 12) * 12 + root % 12
-        val interval     = if (intervals.isNotEmpty()) intervals[sectorDegree % intervals.size] else sectorDegree * 2
-        val rawNote      = rootInOctave + interval
-        val targetNote   = snapToScale(rawNote, root, scaleName).coerceIn(0, 127)
-        val velocity     = (distance * 127f).toInt().coerceIn(0, 127)
+
+        // Anchor to refNote's octave; add the scale interval for the chosen degree
+        val octaveBase = (refNote / 12) * 12
+        val interval   = intervals.getOrElse(sectorDegree % intervals.size.coerceAtLeast(1)) { sectorDegree * 2 }
+        val rawNote    = octaveBase + (root % 12) + interval
+        val targetNote = snapToScale(rawNote, root, scaleName).coerceIn(0, 127)
+        val velocity   = (distance * 127f).toInt().coerceIn(0, 127)
 
         if (targetNote != activeJoystickNote) {
             if (activeJoystickNote >= 0) sendNoteOff(activeJoystickNote, harmonyChannel)
@@ -183,7 +192,7 @@ class MidiEngine(private val context: Context) {
     // ─── Joystick 2 — chord voicing ───────────────────────────────────────────
 
     fun joystickChordUpdate(chordType: String, distance: Float) {
-        val refNote = if (isHardlocked) hardlockedNote else _analysis.value.lastNote
+        val refNote  = effectiveRootNote()
         if (refNote < 0) return
         val velocity = (distance * 127f).toInt().coerceIn(1, 127)
         val notes    = buildChordVoicing(refNote, chordType)
@@ -243,43 +252,30 @@ class MidiEngine(private val context: Context) {
             "Whole Tone"   to listOf(0,2,4,6,8,10),
             "Diminished"   to listOf(0,2,3,5,6,8,9,11)
         )
-        if (pitchClasses.isEmpty()) return Pair(0, "Major")
+        if (pitchClasses.isEmpty()) return 0 to "Major"
 
         val now = System.currentTimeMillis()
-        // Time-weighted pitch-class accumulator: recent notes score higher
         val weighted = mutableMapOf<Int, Double>()
         buffer.forEach { (ts, note) ->
-            val age = (now - ts).toDouble() / BUFFER_WINDOW_MS   // 0 = just now, 1 = oldest
-            val w   = 1.0 - age * 0.5                             // weight: 1.0 → 0.5
+            val age = (now - ts).toDouble() / BUFFER_WINDOW_MS
+            val w   = 1.0 - age * 0.5   // recent notes score higher
             weighted[note % 12] = (weighted[note % 12] ?: 0.0) + w
         }
 
-        var bestScore = -1.0
-        var bestRoot  = 0
-        var bestScale = "Major"
-
+        var bestScore = -1.0; var bestRoot = 0; var bestScale = "Major"
         for (root in 0..11) {
             for ((scaleName, intervals) in scales) {
                 val scaleNotes = intervals.map { (root + it) % 12 }.toSet()
-                var score = 0.0
-                for ((pc, w) in weighted) {
-                    if (pc in scaleNotes) score += w
-                }
-                // Weight by how many of the played pitch-classes the scale covers
-                val coverage = pitchClasses.count { it in scaleNotes }.toDouble() / pitchClasses.size
-                score *= coverage
-                if (score > bestScore) {
-                    bestScore = score
-                    bestRoot  = root
-                    bestScale = scaleName
-                }
+                var score = weighted.entries.sumOf { (pc, w) -> if (pc in scaleNotes) w else 0.0 }
+                score *= pitchClasses.count { it in scaleNotes }.toDouble() / pitchClasses.size
+                if (score > bestScore) { bestScore = score; bestRoot = root; bestScale = scaleName }
             }
         }
-        return Pair(bestRoot, bestScale)
+        return bestRoot to bestScale
     }
 
     private fun inferChord(note: Int, root: Int): String {
-        val degree = ((note % 12) - root + 12) % 12
+        val degree          = ((note % 12) - root + 12) % 12
         val diatonicDegrees = listOf(0, 2, 4, 5, 7, 9, 11)
         val romanNumerals   = listOf("I", "ii", "iii", "IV", "V", "vi", "vii\u00B0")
         val idx = diatonicDegrees.indexOf(degree)
@@ -290,8 +286,8 @@ class MidiEngine(private val context: Context) {
         stopLastHarmonyNotes()
         val root      = _analysis.value.rootNote
         val scaleName = _analysis.value.scaleName
-        val third = snapToScale(rootNote + 4, root, scaleName).coerceIn(0, 127)
-        val fifth  = snapToScale(rootNote + 7, root, scaleName).coerceIn(0, 127)
+        val third     = snapToScale(rootNote + 4, root, scaleName).coerceIn(0, 127)
+        val fifth     = snapToScale(rootNote + 7, root, scaleName).coerceIn(0, 127)
         lastHarmonyNotes = listOf(third, fifth)
         sendNoteOn(third, velocity, harmonyChannel)
         sendNoteOn(fifth, velocity, harmonyChannel)
@@ -302,9 +298,17 @@ class MidiEngine(private val context: Context) {
         lastHarmonyNotes = emptyList()
     }
 
-    // ─────────────────────────────────────────────────────────────────────────
-    // Scale / chord helpers
-    // ─────────────────────────────────────────────────────────────────────────
+    // ─── Helpers ──────────────────────────────────────────────────────────────
+
+    /** Returns the note to use as reference for voice generation. */
+    private fun effectiveRootNote(): Int =
+        if (isHardlocked) hardlockedNote else _analysis.value.lastNote
+
+    /** Returns the root pitch-class MIDI note (in standard octave range) to build chords from. */
+    private fun effectiveRoot(): Int {
+        val note = effectiveRootNote()
+        return if (note >= 0) note else 60  // default middle C
+    }
 
     fun snapToScale(note: Int, root: Int, scaleName: String): Int {
         val intervals = scaleIntervals(scaleName)
@@ -312,7 +316,6 @@ class MidiEngine(private val context: Context) {
         val octave = note / 12
         val pc     = note % 12
         val relPc  = ((pc - root) + 12) % 12
-        // Find closest scale degree by semitone distance
         val closest = intervals.minByOrNull { abs(it - relPc) } ?: relPc
         return octave * 12 + ((root + closest) % 12)
     }
@@ -335,30 +338,28 @@ class MidiEngine(private val context: Context) {
         else           -> listOf(0,2,4,5,7,9,11)
     }
 
-    private fun buildChordVoicing(root: Int, chordType: String): List<Int> {
-        val intervals = when (chordType) {
-            "Triad"  -> listOf(0, 4, 7)
-            "7th"    -> listOf(0, 4, 7, 10)
-            "9th"    -> listOf(0, 4, 7, 10, 14)
-            "11th"   -> listOf(0, 4, 7, 10, 14, 17)
-            "13th"   -> listOf(0, 4, 7, 10, 14, 17, 21)
-            "sus2"   -> listOf(0, 2, 7)
-            "sus4"   -> listOf(0, 5, 7)
-            "Power"  -> listOf(0, 7)
-            "add9"   -> listOf(0, 4, 7, 14)
-            "maj7"   -> listOf(0, 4, 7, 11)
-            "min7"   -> listOf(0, 3, 7, 10)
-            "dim7"   -> listOf(0, 3, 6, 9)
-            "aug"    -> listOf(0, 4, 8)
-            "hdim"   -> listOf(0, 3, 6, 10)
-            else     -> listOf(0, 4, 7)
-        }
-        return intervals.map { (root + it).coerceIn(0, 127) }
+    private fun buildChordIntervals(chordType: String): List<Int> = when (chordType) {
+        "Triad", "Major" -> listOf(0, 4, 7)
+        "7th"            -> listOf(0, 4, 7, 10)
+        "9th"            -> listOf(0, 4, 7, 10, 14)
+        "11th"           -> listOf(0, 4, 7, 10, 14, 17)
+        "13th"           -> listOf(0, 4, 7, 10, 14, 17, 21)
+        "sus2"           -> listOf(0, 2, 7)
+        "sus4"           -> listOf(0, 5, 7)
+        "Power"          -> listOf(0, 7)
+        "add9"           -> listOf(0, 4, 7, 14)
+        "maj7"           -> listOf(0, 4, 7, 11)
+        "min7"           -> listOf(0, 3, 7, 10)
+        "dim7"           -> listOf(0, 3, 6, 9)
+        "aug"            -> listOf(0, 4, 8)
+        "hdim"           -> listOf(0, 3, 6, 10)
+        else             -> listOf(0, 4, 7)
     }
 
-    // ─────────────────────────────────────────────────────────────────────────
-    // MIDI send helpers
-    // ─────────────────────────────────────────────────────────────────────────
+    private fun buildChordVoicing(root: Int, chordType: String): List<Int> =
+        buildChordIntervals(chordType).map { (root + it).coerceIn(0, 127) }
+
+    // ─── MIDI send primitives ────────────────────────────────────────────────
 
     private fun sendNoteOn(note: Int, velocity: Int, channel: Int) {
         val ch = channel.coerceIn(0, 15)
@@ -388,16 +389,10 @@ class MidiEngine(private val context: Context) {
     }
 
     private fun sendPitchBend(value: Int, channel: Int) {
-        // 14-bit pitch bend: 0..16383, center = 8192
         val v   = value.coerceIn(0, 16383)
         val lsb = (v and 0x7F).toByte()
         val msb = ((v shr 7) and 0x7F).toByte()
         val ch  = channel.coerceIn(0, 15)
         outputSender?.invoke(byteArrayOf((0xE0 or ch).toByte(), lsb, msb))
-    }
-
-    companion object {
-        // Chord type per strum strip index (matches STRUM_LABELS in PerformanceScreen)
-        val STRUM_CHORD_TYPES = listOf("Major", "Triad", "7th", "9th", "sus2", "sus4")
     }
 }

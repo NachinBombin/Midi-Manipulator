@@ -31,7 +31,7 @@ class MainActivity : ComponentActivity() {
 
     private val bleLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
-    ) { /* handle result if needed */ }
+    ) { /* permissions handled; MidiManager.refreshDevices() is called after init */ }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -47,12 +47,16 @@ class MainActivity : ComponentActivity() {
             val currentTheme by themeManager.currentTheme.collectAsState()
             val vm: AppViewModel = viewModel()
             appViewModel = vm
+
+            // FIX: inject engine reference so ViewModel can call unlock/hardlock directly
+            LaunchedEffect(Unit) { vm.engineRef = midiManager.engine }
+
             gamepadDispatcher = remember { GamepadDispatcher(vm, midiManager.engine) }
 
             AppTheme(preset = currentTheme) {
                 Surface(
                     modifier = Modifier.fillMaxSize(),
-                    color = currentTheme.bg
+                    color    = currentTheme.bg
                 ) {
                     AppNavHost(
                         viewModel    = vm,
