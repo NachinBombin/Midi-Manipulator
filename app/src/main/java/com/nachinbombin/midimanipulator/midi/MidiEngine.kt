@@ -7,7 +7,9 @@ import kotlin.math.abs
 
 data class MidiAnalysis(
     val lastNote: Int = -1,
+    val lastNoteName: String = "—",
     val rootNote: Int = -1,
+    val rootNoteName: String = "—",
     val scaleName: String = "—",
     val chordContext: String = "—"
 )
@@ -18,13 +20,26 @@ class MidiEngine(private val context: Context) {
         private const val BUFFER_WINDOW_MS = 4000L
         private const val NOTE_ON  = 0x90
         private const val NOTE_OFF = 0x80
+
+        private val NOTE_NAMES = arrayOf(
+            "C","C#","D","D#","E","F","F#","G","G#","A","A#","B"
+        )
+
+        fun noteName(note: Int): String {
+            if (note < 0) return "—"
+            val pc = note % 12
+            val octave = note / 12 - 1
+            return "${NOTE_NAMES[pc]}$octave"
+        }
     }
 
     private val _analysis = MutableStateFlow(MidiAnalysis())
     val analysis: StateFlow<MidiAnalysis> = _analysis
 
-    // Rolling buffer: Pair(timestamp, noteNumber)
     private val noteBuffer = ArrayDeque<Pair<Long, Int>>()
+
+    // Track active generated harmony notes so we stop exactly those notes
+    private var lastHarmonyNotes: List<Int> = emptyList()
 
     var hardlockedNote: Int = -1
         private set
@@ -32,9 +47,25 @@ class MidiEngine(private val context: Context) {
         private set
 
     var harmonyChannel: Int = 1
+
     var portamentoTime: Int = 0
+        set(value) {
+            field = value
+            sendCC(5, value.coerceIn(0, 127), harmonyChannel)
+            sendCC(65, if (value > 0) 127 else 0, harmonyChannel)
+        }
+
     var pitchBend: Int = 8192
+        set(value) {
+            field = value
+            sendPitchBend(value, harmonyChannel)
+        }
+
     var modValue: Int = 0
+        set(value) {
+            field = value
+            sendCC(1, value.coerceIn(0, 127), harmonyChannel)
+        }
 
     var outputSender: ((ByteArray) -> Unit)? = null
 
@@ -44,14 +75,10 @@ class MidiEngine(private val context: Context) {
             noteBuffer.addLast(Pair(now, noteNumber))
             pruneBuffer(now)
             reanalyze(noteNumber)
-            if (isHardlocked) {
-                generateVoices(hardlockedNote, velocity)
-            } else {
-                generateVoices(noteNumber, velocity)
-            }
+            val refNote = if (isHardlocked) hardlockedNote else noteNumber
+            generateVoices(refNote, velocity)
         } else {
-            sendNoteOff(noteNumber + 4, harmonyChannel)
-            sendNoteOff(noteNumber + 7, harmonyChannel)
+            stopLastHarmonyNotes()
         }
     }
 
@@ -65,6 +92,15 @@ class MidiEngine(private val context: Context) {
         hardlockedNote = -1
     }
 
+    // Strum note helpers (called from UI)
+    fun strumNoteOn(stripIndex: Int, noteIndex: Int, velocity: Int) {
+        sendNoteOn(noteIndex.coerceIn(0, 127), velocity, harmonyChannel)
+    }
+
+    fun strumNoteOff(stripIndex: Int, noteIndex: Int) {
+        sendNoteOff(noteIndex.coerceIn(0, 127), harmonyChannel)
+    }
+
     private fun pruneBuffer(now: Long) {
         while (noteBuffer.isNotEmpty() && now - noteBuffer.first().first > BUFFER_WINDOW_MS) {
             noteBuffer.removeFirst()
@@ -76,9 +112,11 @@ class MidiEngine(private val context: Context) {
         val (root, scale) = inferScale(pitchClasses, noteBuffer)
         val chord = inferChord(currentNote, root)
         _analysis.value = MidiAnalysis(
-            lastNote = currentNote,
-            rootNote = root,
-            scaleName = scale,
+            lastNote     = currentNote,
+            lastNoteName = noteName(currentNote),
+            rootNote     = root,
+            rootNoteName = NOTE_NAMES[root % 12],
+            scaleName    = scale,
             chordContext = chord
         )
     }
@@ -124,8 +162,7 @@ class MidiEngine(private val context: Context) {
                 for ((pc, w) in weighted) {
                     if (pc in scaleNotes) score += w
                 }
-                val coverage = if (pitchClasses.isEmpty()) 0.0
-                    else pitchClasses.count { it in scaleNotes }.toDouble() / pitchClasses.size
+                val coverage = pitchClasses.count { it in scaleNotes }.toDouble() / pitchClasses.size
                 score *= coverage
                 if (score > bestScore) {
                     bestScore = score
@@ -140,18 +177,25 @@ class MidiEngine(private val context: Context) {
     private fun inferChord(note: Int, root: Int): String {
         val degree = ((note % 12) - root + 12) % 12
         val diatonicDegrees = listOf(0, 2, 4, 5, 7, 9, 11)
-        val romanNumerals  = listOf("I", "ii", "iii", "IV", "V", "vi", "vii°")
+        val romanNumerals   = listOf("I", "ii", "iii", "IV", "V", "vi", "vii°")
         val idx = diatonicDegrees.indexOf(degree)
         return if (idx >= 0) romanNumerals[idx] else "?"
     }
 
     private fun generateVoices(rootNote: Int, velocity: Int) {
+        stopLastHarmonyNotes()
         val root = _analysis.value.rootNote
         val scaleName = _analysis.value.scaleName
-        val third = snapToScale(rootNote + 4, root, scaleName)
-        val fifth  = snapToScale(rootNote + 7, root, scaleName)
-        sendNoteOn(third.coerceIn(0, 127), velocity, harmonyChannel)
-        sendNoteOn(fifth.coerceIn(0, 127), velocity, harmonyChannel)
+        val third = snapToScale(rootNote + 4, root, scaleName).coerceIn(0, 127)
+        val fifth  = snapToScale(rootNote + 7, root, scaleName).coerceIn(0, 127)
+        lastHarmonyNotes = listOf(third, fifth)
+        sendNoteOn(third, velocity, harmonyChannel)
+        sendNoteOn(fifth, velocity, harmonyChannel)
+    }
+
+    private fun stopLastHarmonyNotes() {
+        lastHarmonyNotes.forEach { sendNoteOff(it, harmonyChannel) }
+        lastHarmonyNotes = emptyList()
     }
 
     private fun snapToScale(note: Int, root: Int, scaleName: String): Int {

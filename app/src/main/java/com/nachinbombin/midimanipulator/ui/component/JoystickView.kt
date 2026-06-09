@@ -34,12 +34,12 @@ fun JoystickView(
     sectors: List<JoystickSector>,
     activeSectorIndex: Int,
     size: Dp = 180.dp,
+    modifier: Modifier = Modifier,
     onMove: (x: Float, y: Float) -> Unit,
     onRelease: () -> Unit = {}
 ) {
     val isDragging = remember { mutableStateOf(false) }
 
-    // Glow pulse animation when dragging
     val glowAlpha by animateFloatAsState(
         targetValue = if (isDragging.value) 0.55f else 0.15f,
         animationSpec = tween(300, easing = FastOutSlowInEasing), label = "glow"
@@ -48,22 +48,21 @@ fun JoystickView(
         targetValue = if (isDragging.value) 1.0f else 0.6f,
         animationSpec = tween(400, easing = FastOutSlowInEasing), label = "glowR"
     )
-
-    // Thumb scale spring
     val thumbScale by animateFloatAsState(
         targetValue = if (isDragging.value) 1.18f else 1f,
-        animationSpec = spring(dampingRatio = 0.4f, stiffness = Spring.StiffnessMedium), label = "thumb"
+        animationSpec = spring(dampingRatio = 0.4f, stiffness = Spring.StiffnessMedium),
+        label = "thumb"
     )
 
     Box(
-        modifier = Modifier
+        modifier = modifier
             .size(size)
             .pointerInput(Unit) {
                 detectDragGestures(
-                    onDragStart = { isDragging.value = true },
-                    onDragEnd   = { isDragging.value = false; onRelease() },
-                    onDragCancel= { isDragging.value = false; onRelease() },
-                    onDrag      = { change, _ ->
+                    onDragStart  = { isDragging.value = true },
+                    onDragEnd    = { isDragging.value = false; onRelease() },
+                    onDragCancel = { isDragging.value = false; onRelease() },
+                    onDrag       = { change, _ ->
                         change.consume()
                         val cx = size.toPx() / 2f
                         val cy = size.toPx() / 2f
@@ -86,18 +85,16 @@ fun JoystickView(
             val tx     = cx + x * (outerR - thumbR - 8f)
             val ty     = cy + y * (outerR - thumbR - 8f)
 
-            // ── Outer glow bloom ──────────────────────────────────────────────
             drawCircle(
                 brush = Brush.radialGradient(
-                    colors  = listOf(accent.copy(alpha = glowAlpha * 0.9f), Color.Transparent),
-                    center  = Offset(cx, cy),
-                    radius  = outerR * (1.3f + glowRadius * 0.3f)
+                    colors = listOf(accent.copy(alpha = glowAlpha * 0.9f), Color.Transparent),
+                    center = Offset(cx, cy),
+                    radius = outerR * (1.3f + glowRadius * 0.3f)
                 ),
                 radius = outerR * (1.3f + glowRadius * 0.3f),
                 center = Offset(cx, cy)
             )
 
-            // ── Base plate gradient ───────────────────────────────────────────
             drawCircle(
                 brush = Brush.radialGradient(
                     colors = listOf(elevated, bg),
@@ -108,12 +105,12 @@ fun JoystickView(
                 center = Offset(cx, cy)
             )
 
-            // ── Sector ring ───────────────────────────────────────────────────
             val sectorCount = sectors.size
             sectors.forEachIndexed { i, sector ->
-                val isActive = i == activeSectorIndex
-                val sweepAngle = 360f / sectorCount
+                val isActive   = i == activeSectorIndex
                 val startAngle = sector.startDeg - 90f
+                val sweepAngle = (sector.endDeg - sector.startDeg).coerceAtLeast(0.1f)
+
                 val arcColor = if (isActive)
                     Brush.sweepGradient(listOf(accent, accentSoft, accent))
                 else
@@ -123,7 +120,6 @@ fun JoystickView(
                         textMuted.copy(alpha = 0.25f)
                     ))
 
-                // Sector fill
                 drawArc(
                     brush      = arcColor,
                     startAngle = startAngle + 1f,
@@ -134,19 +130,27 @@ fun JoystickView(
                     alpha      = if (isActive) 0.35f else 0.10f
                 )
 
-                // Sector border line
-                val linePx = startAngle * PI.toFloat() / 180f
+                // Divider line with hysteresis dead-band
+                val lineRad    = startAngle * PI.toFloat() / 180f
+                val hysteresis = 5f * PI.toFloat() / 180f
                 drawLine(
                     color       = if (isActive) accent.copy(0.7f) else textMuted.copy(0.18f),
-                    start       = Offset(cx + innerR * cos(linePx), cy + innerR * sin(linePx)),
-                    end         = Offset(cx + rimR  * cos(linePx), cy + rimR  * sin(linePx)),
+                    start       = Offset(
+                        cx + innerR * cos(lineRad + hysteresis),
+                        cy + innerR * sin(lineRad + hysteresis)
+                    ),
+                    end         = Offset(
+                        cx + rimR * cos(lineRad + hysteresis),
+                        cy + rimR * sin(lineRad + hysteresis)
+                    ),
                     strokeWidth = if (isActive) 2.5f else 1f
                 )
 
-                // Active sector outer glow arc
                 if (isActive) {
                     drawArc(
-                        brush      = Brush.sweepGradient(listOf(accent.copy(0.9f), accentSoft.copy(0.6f), accent.copy(0.9f))),
+                        brush      = Brush.sweepGradient(
+                            listOf(accent.copy(0.9f), accentSoft.copy(0.6f), accent.copy(0.9f))
+                        ),
                         startAngle = startAngle,
                         sweepAngle = sweepAngle,
                         useCenter  = false,
@@ -158,15 +162,15 @@ fun JoystickView(
                 }
             }
 
-            // ── Rim ring ──────────────────────────────────────────────────────
             drawCircle(
-                brush  = Brush.sweepGradient(listOf(accent.copy(0.6f), accentSoft.copy(0.3f), accent.copy(0.6f))),
+                brush  = Brush.sweepGradient(
+                    listOf(accent.copy(0.6f), accentSoft.copy(0.3f), accent.copy(0.6f))
+                ),
                 radius = rimR,
                 center = Offset(cx, cy),
                 style  = Stroke(width = 2f)
             )
 
-            // ── Inner dead-zone ring ──────────────────────────────────────────
             drawCircle(
                 color  = textMuted.copy(alpha = 0.15f),
                 radius = innerR,
@@ -174,7 +178,6 @@ fun JoystickView(
                 style  = Stroke(width = 1.2f)
             )
 
-            // ── Thumb glow ────────────────────────────────────────────────────
             drawCircle(
                 brush = Brush.radialGradient(
                     colors = listOf(accentSoft.copy(alpha = glowAlpha * 1.2f), Color.Transparent),
@@ -185,7 +188,6 @@ fun JoystickView(
                 center = Offset(tx, ty)
             )
 
-            // ── Thumb fill (gradient sphere) ──────────────────────────────────
             drawCircle(
                 brush = Brush.radialGradient(
                     colors = listOf(
@@ -200,7 +202,6 @@ fun JoystickView(
                 center = Offset(tx, ty)
             )
 
-            // Thumb rim
             drawCircle(
                 color  = Color.White.copy(alpha = 0.35f),
                 radius = thumbR,
