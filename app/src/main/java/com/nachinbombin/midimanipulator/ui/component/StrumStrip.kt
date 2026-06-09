@@ -15,13 +15,14 @@ import androidx.compose.ui.input.pointer.*
 import androidx.compose.ui.text.*
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.*
+import kotlinx.coroutines.launch
 import kotlin.math.abs
 import kotlin.math.roundToInt
 
 @Composable
 fun StrumStrip(
     label: String,
-    noteCount: Int,         // ticks in the strip (e.g. 12 for 3 octaves × 4 notes)
+    noteCount: Int,
     accent: Color,
     accentSoft: Color,
     bg: Color,
@@ -34,158 +35,186 @@ fun StrumStrip(
     onNoteOff: (noteIndex: Int) -> Unit,
     modifier: Modifier = Modifier
 ) {
-    var lastX by remember { mutableStateOf(-1f) }
+    val coroutineScope = rememberCoroutineScope()
+    var lastX      by remember { mutableStateOf(-1f) }
     var activeIndex by remember { mutableStateOf(-1) }
-    var rippleX by remember { mutableStateOf(0f) }
-    var rippleAlpha by remember { mutableStateOf(0f) }
-    val rippleAnim = remember { Animatable(0f) }
+    val rippleAnim  = remember { Animatable(0f) }
+    var rippleX     by remember { mutableStateOf(0f) }
 
-    // Glow when active
     val glowAlpha by animateFloatAsState(
-        targetValue = if (activeIndex >= 0) 0.55f else if (locked) 0.3f else 0f,
+        targetValue   = if (activeIndex >= 0) 0.55f else if (locked) 0.3f else 0f,
         animationSpec = tween(200), label = "sg"
     )
 
     val textMeasurer = rememberTextMeasurer()
 
-    suspend fun triggerRipple(x: Float) {
-        rippleX = x
-        rippleAnim.snapTo(0f)
-        rippleAnim.animateTo(1f, tween(380, easing = FastOutSlowInEasing))
-    }
-
+    // FIX: LaunchedEffect body was truncated — completed ripple trigger
     LaunchedEffect(activeIndex) {
-        if (activeIndex >= 0) triggerRipple(rippleX)
+        if (activeIndex >= 0) {
+            rippleAnim.snapTo(0f)
+            rippleAnim.animateTo(1f, tween(380, easing = FastOutSlowInEasing))
+        }
     }
 
-    Column(modifier = modifier) {
+    fun noteIndexAt(x: Float, width: Float): Int {
+        if (width <= 0f || noteCount <= 0) return 0
+        return ((x / width) * noteCount).toInt().coerceIn(0, noteCount - 1)
+    }
+
+    fun velocityFromDx(dx: Float): Int {
+        val speed = abs(dx).coerceIn(1f, 300f)
+        return (speed / 300f * 127f).toInt().coerceIn(20, 127)
+    }
+
+    Box(
+        modifier = modifier.height(36.dp),
+        contentAlignment = Alignment.Center
+    ) {
         Canvas(
             modifier = Modifier
-                .fillMaxWidth()
-                .height(52.dp)
+                .fillMaxSize()
                 .pointerInput(locked) {
-                    if (locked) return@pointerInput
                     detectDragGestures(
-                        onDragStart = { off ->
-                            lastX = off.x
-                            rippleX = off.x
+                        onDragStart = { offset ->
+                            if (!locked) {
+                                rippleX = offset.x
+                                val idx = noteIndexAt(offset.x, size.width.toFloat())
+                                if (idx != activeIndex) {
+                                    if (activeIndex >= 0) onNoteOff(activeIndex)
+                                    onNoteOn(idx, 80)
+                                    activeIndex = idx
+                                    lastX = offset.x
+                                    coroutineScope.launch {
+                                        rippleAnim.snapTo(0f)
+                                        rippleAnim.animateTo(1f, tween(380, easing = FastOutSlowInEasing))
+                                    }
+                                }
+                            }
                         },
-                        onDragEnd    = {
-                            if (activeIndex >= 0) onNoteOff(activeIndex)
-                            activeIndex = -1; lastX = -1f
+                        onDrag = { change, dragAmount ->
+                            change.consume()
+                            if (!locked) {
+                                val idx = noteIndexAt(change.position.x, size.width.toFloat())
+                                if (idx != activeIndex) {
+                                    // Strum continuity: send new NoteOn BEFORE NoteOff of previous
+                                    val vel = velocityFromDx(dragAmount.x)
+                                    onNoteOn(idx, vel)
+                                    if (activeIndex >= 0) onNoteOff(activeIndex)
+                                    activeIndex = idx
+                                    rippleX = change.position.x
+                                    coroutineScope.launch {
+                                        rippleAnim.snapTo(0f)
+                                        rippleAnim.animateTo(1f, tween(280, easing = FastOutSlowInEasing))
+                                    }
+                                }
+                                lastX = change.position.x
+                            }
+                        },
+                        onDragEnd = {
+                            if (!locked && activeIndex >= 0) {
+                                onNoteOff(activeIndex)
+                                activeIndex = -1
+                            }
                         },
                         onDragCancel = {
-                            if (activeIndex >= 0) onNoteOff(activeIndex)
-                            activeIndex = -1; lastX = -1f
-                        },
-                        onDrag = { change, _ ->
-                            change.consume()
-                            val w = size.width
-                            val pct = (change.position.x / w).coerceIn(0f, 1f)
-                            val idx = (pct * noteCount).toInt().coerceIn(0, noteCount - 1)
-                            val swipeVel = if (lastX >= 0f)
-                                abs(change.position.x - lastX).coerceAtMost(120f) / 120f
-                            else 0.5f
-                            val vel = (40 + swipeVel * 87f).roundToInt()
-                            if (idx != activeIndex) {
-                                if (activeIndex >= 0) onNoteOff(activeIndex)
-                                onNoteOn(idx, vel)
-                                activeIndex = idx
-                                rippleX = change.position.x
+                            if (!locked && activeIndex >= 0) {
+                                onNoteOff(activeIndex)
+                                activeIndex = -1
                             }
-                            lastX = change.position.x
                         }
                     )
                 }
                 .pointerInput(locked) {
-                    if (locked) return@pointerInput
                     detectTapGestures(
-                        onTap = { off ->
-                            val pct = (off.x / size.width).coerceIn(0f, 1f)
-                            val idx = (pct * noteCount).toInt().coerceIn(0, noteCount - 1)
-                            onNoteOn(idx, 80)
-                            onNoteOff(idx)
+                        onTap = { offset ->
+                            if (!locked) {
+                                val idx = noteIndexAt(offset.x, size.width.toFloat())
+                                onNoteOn(idx, 100)
+                                // Short pluck: fire NoteOff after a brief delay
+                                coroutineScope.launch {
+                                    kotlinx.coroutines.delay(120)
+                                    onNoteOff(idx)
+                                }
+                            }
+                        },
+                        onLongPress = { offset ->
+                            if (!locked) {
+                                val idx = noteIndexAt(offset.x, size.width.toFloat())
+                                onNoteOn(idx, 110)
+                                activeIndex = idx
+                            }
                         }
                     )
                 }
         ) {
             val w = size.width
             val h = size.height
-            val tickW = w / noteCount
+            val stripH = h * 0.55f
+            val topY   = (h - stripH) / 2f
 
-            // ── Background gradient ─────────────────────────────────────────
+            // Track background
             drawRoundRect(
-                brush = Brush.verticalGradient(
-                    colors = listOf(elevated.copy(alpha = 0.9f), bg)
+                brush = Brush.horizontalGradient(
+                    listOf(elevated, bg.copy(alpha = 0.7f), elevated)
                 ),
-                cornerRadius = CornerRadius(10f)
+                topLeft = Offset(0f, topY),
+                size    = Size(w, stripH),
+                cornerRadius = CornerRadius(stripH / 2f)
             )
 
-            // ── Glow wash over active zone ──────────────────────────────────
+            // Glow overlay when active
             if (glowAlpha > 0f) {
-                val glowX = if (activeIndex >= 0) (activeIndex + 0.5f) * tickW else rippleX
-                drawRect(
+                drawRoundRect(
                     brush = Brush.horizontalGradient(
-                        colors = listOf(
-                            Color.Transparent,
-                            accent.copy(alpha = glowAlpha * 0.4f),
-                            accentSoft.copy(alpha = glowAlpha * 0.55f),
-                            accent.copy(alpha = glowAlpha * 0.4f),
-                            Color.Transparent
-                        ),
-                        startX = glowX - w * 0.25f,
-                        endX   = glowX + w * 0.25f
-                    )
+                        listOf(
+                            accentSoft.copy(alpha = glowAlpha * 0.4f),
+                            accent.copy(alpha = glowAlpha * 0.6f),
+                            accentSoft.copy(alpha = glowAlpha * 0.4f)
+                        )
+                    ),
+                    topLeft = Offset(0f, topY),
+                    size    = Size(w, stripH),
+                    cornerRadius = CornerRadius(stripH / 2f)
                 )
             }
 
-            // ── Ripple circle ───────────────────────────────────────────────
-            val rp = rippleAnim.value
-            if (rp > 0f && rp < 1f) {
+            // Track border
+            drawRoundRect(
+                color  = accent.copy(alpha = if (activeIndex >= 0 || locked) 0.55f else 0.15f),
+                topLeft = Offset(0f, topY),
+                size    = Size(w, stripH),
+                cornerRadius = CornerRadius(stripH / 2f),
+                style  = Stroke(width = 1.2f)
+            )
+
+            // Tick marks
+            val tickSpacing = w / noteCount
+            for (i in 0 until noteCount) {
+                val tx      = tickSpacing * i + tickSpacing / 2f
+                val isActive = i == activeIndex
+                val tickH   = if (isActive) stripH * 0.9f else stripH * 0.55f
+                val tickTop = topY + (stripH - tickH) / 2f
+                drawLine(
+                    color       = if (isActive) accent else textMuted.copy(alpha = 0.35f),
+                    start       = Offset(tx, tickTop),
+                    end         = Offset(tx, tickTop + tickH),
+                    strokeWidth = if (isActive) 2.5f else 1f
+                )
+            }
+
+            // Ripple
+            val ra = rippleAnim.value
+            if (ra > 0f && ra < 1f) {
                 drawCircle(
-                    color  = accent.copy(alpha = (1f - rp) * 0.55f),
-                    radius = rp * w * 0.38f,
+                    brush  = Brush.radialGradient(
+                        listOf(accent.copy(alpha = (1f - ra) * 0.55f), Color.Transparent),
+                        center = Offset(rippleX, h / 2f),
+                        radius = ra * w * 0.35f
+                    ),
+                    radius = ra * w * 0.35f,
                     center = Offset(rippleX, h / 2f)
                 )
             }
-
-            // ── Tick marks ─────────────────────────────────────────────────
-            for (i in 0 until noteCount) {
-                val tx = (i + 0.5f) * tickW
-                val isActive = i == activeIndex
-                // Tall tick for octave boundaries
-                val isOctave = i % (noteCount / 3) == 0
-                val tickH = when {
-                    isActive -> h * 0.78f
-                    isOctave -> h * 0.52f
-                    else     -> h * 0.35f
-                }
-                // Glow behind active tick
-                if (isActive) {
-                    drawLine(
-                        brush = Brush.verticalGradient(
-                            colors = listOf(Color.Transparent, accent.copy(0.6f), Color.Transparent),
-                            startY = (h - tickH) / 2f, endY = (h + tickH) / 2f
-                        ),
-                        start       = Offset(tx, (h - tickH) / 2f),
-                        end         = Offset(tx, (h + tickH) / 2f),
-                        strokeWidth = 5f
-                    )
-                }
-                drawLine(
-                    color       = if (isActive) accentSoft else if (isOctave) textMuted.copy(0.6f) else textMuted.copy(0.25f),
-                    start       = Offset(tx, (h - tickH) / 2f),
-                    end         = Offset(tx, (h + tickH) / 2f),
-                    strokeWidth = if (isActive) 2.5f else if (isOctave) 1.8f else 1f
-                )
-            }
-
-            // ── Border ─────────────────────────────────────────────────────
-            drawRoundRect(
-                color        = if (locked) Color(0xFFFF4466).copy(0.6f) else accent.copy(if (activeIndex >= 0) 0.5f else 0.15f),
-                cornerRadius = CornerRadius(10f),
-                style        = Stroke(width = 1.8f)
-            )
         }
     }
 }

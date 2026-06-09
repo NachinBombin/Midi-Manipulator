@@ -15,8 +15,25 @@ android {
         versionCode            = 1
         versionName            = "1.0"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
-        // NDK / CMake block intentionally omitted until cpp sources exist.
-        // Re-add externalNativeBuild once src/main/cpp/CMakeLists.txt is present.
+
+        // FIX: NDK/CMake block was commented out despite midi_engine.cpp and CMakeLists.txt existing.
+        // Re-enabled so the C++ MIDI engine is compiled into the app.
+        externalNativeBuild {
+            cmake {
+                cppFlags += "-std=c++17"
+                arguments += "-DANDROID_STL=c++_shared"
+            }
+        }
+        ndk {
+            abiFilters += listOf("arm64-v8a", "x86_64")
+        }
+    }
+
+    externalNativeBuild {
+        cmake {
+            path = file("src/main/cpp/CMakeLists.txt")
+            version = "3.22.1"
+        }
     }
 
     buildTypes {

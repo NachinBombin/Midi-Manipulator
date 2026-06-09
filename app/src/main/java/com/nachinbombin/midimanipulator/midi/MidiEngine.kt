@@ -7,11 +7,11 @@ import kotlin.math.abs
 
 data class MidiAnalysis(
     val lastNote: Int = -1,
-    val lastNoteName: String = "—",
+    val lastNoteName: String = "\u2014",
     val rootNote: Int = -1,
-    val rootNoteName: String = "—",
-    val scaleName: String = "—",
-    val chordContext: String = "—"
+    val rootNoteName: String = "\u2014",
+    val scaleName: String = "\u2014",
+    val chordContext: String = "\u2014"
 )
 
 class MidiEngine(private val context: Context) {
@@ -26,7 +26,7 @@ class MidiEngine(private val context: Context) {
         )
 
         fun noteName(note: Int): String {
-            if (note < 0) return "—"
+            if (note < 0) return "\u2014"
             val pc = note % 12
             val octave = note / 12 - 1
             return "${NOTE_NAMES[pc]}$octave"
@@ -40,12 +40,17 @@ class MidiEngine(private val context: Context) {
 
     // Track active generated harmony notes so we stop exactly those notes
     private var lastHarmonyNotes: List<Int> = emptyList()
+    // Track active joystick melody note
+    private var activeJoystickNote: Int = -1
+    // Track active chord notes from joystick 2
+    private var activeChordNotes: List<Int> = emptyList()
 
     var hardlockedNote: Int = -1
         private set
     var isHardlocked: Boolean = false
         private set
 
+    /** Channel (0-based) used for all generated harmony/chord/joystick voices */
     var harmonyChannel: Int = 1
 
     var portamentoTime: Int = 0
@@ -67,7 +72,12 @@ class MidiEngine(private val context: Context) {
             sendCC(1, value.coerceIn(0, 127), harmonyChannel)
         }
 
+    /** Set by MidiManager so the engine can write bytes to the selected output port. */
     var outputSender: ((ByteArray) -> Unit)? = null
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Public API — called from outside
+    // ─────────────────────────────────────────────────────────────────────────
 
     fun onIncomingNote(noteNumber: Int, velocity: Int, isOn: Boolean) {
         val now = System.currentTimeMillis()
@@ -92,7 +102,8 @@ class MidiEngine(private val context: Context) {
         hardlockedNote = -1
     }
 
-    // Strum note helpers (called from UI)
+    // ─── Strum helpers ────────────────────────────────────────────────────────
+
     fun strumNoteOn(stripIndex: Int, noteIndex: Int, velocity: Int) {
         sendNoteOn(noteIndex.coerceIn(0, 127), velocity, harmonyChannel)
     }
@@ -100,6 +111,69 @@ class MidiEngine(private val context: Context) {
     fun strumNoteOff(stripIndex: Int, noteIndex: Int) {
         sendNoteOff(noteIndex.coerceIn(0, 127), harmonyChannel)
     }
+
+    // ─── Joystick 1 — melodic single voice ────────────────────────────────────
+
+    /**
+     * Called continuously as Joystick 1 moves.
+     * [sectorDegree] is the scale-degree index (0 = root, 1 = 2nd, …, 6 = 7th).
+     * [distance] is 0..1 from center to rim → mapped to velocity 0..127.
+     */
+    fun joystickMelodyUpdate(sectorDegree: Int, distance: Float) {
+        val refNote = if (isHardlocked) hardlockedNote else _analysis.value.lastNote
+        if (refNote < 0) return
+
+        val root      = _analysis.value.rootNote
+        val scaleName = _analysis.value.scaleName
+        val intervals = scaleIntervals(scaleName)
+        val interval  = if (intervals.isNotEmpty()) intervals[sectorDegree % intervals.size] else sectorDegree * 2
+        val targetNote = snapToScale((refNote / 12) * 12 + root + interval, root, scaleName).coerceIn(0, 127)
+        val velocity   = (distance * 127f).toInt().coerceIn(0, 127)
+
+        if (targetNote != activeJoystickNote) {
+            if (activeJoystickNote >= 0) sendNoteOff(activeJoystickNote, harmonyChannel)
+            if (velocity > 0) sendNoteOn(targetNote, velocity, harmonyChannel)
+            activeJoystickNote = if (velocity > 0) targetNote else -1
+        } else if (velocity == 0 && activeJoystickNote >= 0) {
+            sendNoteOff(activeJoystickNote, harmonyChannel)
+            activeJoystickNote = -1
+        }
+    }
+
+    fun joystickMelodyRelease() {
+        if (activeJoystickNote >= 0) {
+            sendNoteOff(activeJoystickNote, harmonyChannel)
+            activeJoystickNote = -1
+        }
+    }
+
+    // ─── Joystick 2 — chord voicing ───────────────────────────────────────────
+
+    /**
+     * Called when Joystick 2 enters a new chord-type sector.
+     * [chordType] is the sector label ("Triad", "7th", "maj7", etc.).
+     * [distance] is 0..1 → velocity.
+     */
+    fun joystickChordUpdate(chordType: String, distance: Float) {
+        val refNote = if (isHardlocked) hardlockedNote else _analysis.value.lastNote
+        if (refNote < 0) return
+        val velocity = (distance * 127f).toInt().coerceIn(1, 127)
+        val notes    = buildChordVoicing(refNote, chordType)
+        if (notes != activeChordNotes) {
+            activeChordNotes.forEach { sendNoteOff(it, harmonyChannel) }
+            notes.forEach { sendNoteOn(it.coerceIn(0, 127), velocity, harmonyChannel) }
+            activeChordNotes = notes
+        }
+    }
+
+    fun joystickChordRelease() {
+        activeChordNotes.forEach { sendNoteOff(it, harmonyChannel) }
+        activeChordNotes = emptyList()
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Internal analysis
+    // ─────────────────────────────────────────────────────────────────────────
 
     private fun pruneBuffer(now: Long) {
         while (noteBuffer.isNotEmpty() && now - noteBuffer.first().first > BUFFER_WINDOW_MS) {
@@ -177,14 +251,14 @@ class MidiEngine(private val context: Context) {
     private fun inferChord(note: Int, root: Int): String {
         val degree = ((note % 12) - root + 12) % 12
         val diatonicDegrees = listOf(0, 2, 4, 5, 7, 9, 11)
-        val romanNumerals   = listOf("I", "ii", "iii", "IV", "V", "vi", "vii°")
+        val romanNumerals   = listOf("I", "ii", "iii", "IV", "V", "vi", "vii\u00B0")
         val idx = diatonicDegrees.indexOf(degree)
         return if (idx >= 0) romanNumerals[idx] else "?"
     }
 
     private fun generateVoices(rootNote: Int, velocity: Int) {
         stopLastHarmonyNotes()
-        val root = _analysis.value.rootNote
+        val root      = _analysis.value.rootNote
         val scaleName = _analysis.value.scaleName
         val third = snapToScale(rootNote + 4, root, scaleName).coerceIn(0, 127)
         val fifth  = snapToScale(rootNote + 7, root, scaleName).coerceIn(0, 127)
@@ -198,14 +272,26 @@ class MidiEngine(private val context: Context) {
         lastHarmonyNotes = emptyList()
     }
 
-    private fun snapToScale(note: Int, root: Int, scaleName: String): Int {
+    // ─────────────────────────────────────────────────────────────────────────
+    // Scale / chord helpers
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /**
+     * FIX: was called throughout but never defined.
+     * Snaps [note] to the nearest note in [scaleName] rooted at [root] (pitch-class 0-11).
+     */
+    fun snapToScale(note: Int, root: Int, scaleName: String): Int {
         val intervals = scaleIntervals(scaleName)
-        val pc = ((note % 12) - root + 12) % 12
-        val nearest = intervals.minByOrNull { abs(it - pc) } ?: pc
-        return note + (nearest - pc)
+        if (intervals.isEmpty()) return note
+        val octave = note / 12
+        val pc     = note % 12
+        val relPc  = ((pc - root) + 12) % 12
+        // Find closest scale degree
+        val closest = intervals.minByOrNull { abs(it - relPc) } ?: relPc
+        return octave * 12 + ((root + closest) % 12)
     }
 
-    fun scaleIntervals(scaleName: String): List<Int> = when (scaleName) {
+    private fun scaleIntervals(scaleName: String): List<Int> = when (scaleName) {
         "Major"        -> listOf(0,2,4,5,7,9,11)
         "Natural Min"  -> listOf(0,2,3,5,7,8,10)
         "Harmonic Min" -> listOf(0,2,3,5,7,8,11)
@@ -220,63 +306,67 @@ class MidiEngine(private val context: Context) {
         "Blues"        -> listOf(0,3,5,6,7,10)
         "Whole Tone"   -> listOf(0,2,4,6,8,10)
         "Diminished"   -> listOf(0,2,3,5,6,8,9,11)
-        else           -> listOf(0,2,4,5,7,9,11)
+        else           -> listOf(0,2,4,5,7,9,11)  // fallback: Major
     }
 
-    fun buildChordVoicing(rootNote: Int, chordType: String): List<Int> {
-        val root = rootNote % 12
-        val octave = rootNote / 12
-        val base = root + octave * 12
-        return when (chordType) {
-            "Triad"    -> listOf(base, base+4, base+7)
-            "7th"      -> listOf(base, base+4, base+7, base+10)
-            "9th"      -> listOf(base, base+4, base+7, base+10, base+14)
-            "11th"     -> listOf(base, base+4, base+7, base+10, base+14, base+17)
-            "13th"     -> listOf(base, base+4, base+7, base+10, base+14, base+17, base+21)
-            "sus2"     -> listOf(base, base+2, base+7)
-            "sus4"     -> listOf(base, base+5, base+7)
-            "Power"    -> listOf(base, base+7)
-            "add9"     -> listOf(base, base+4, base+7, base+14)
-            "maj7"     -> listOf(base, base+4, base+7, base+11)
-            "min7"     -> listOf(base, base+3, base+7, base+10)
-            "dim7"     -> listOf(base, base+3, base+6, base+9)
-            "aug"      -> listOf(base, base+4, base+8)
-            "half-dim" -> listOf(base, base+3, base+6, base+10)
-            "Major"    -> listOf(base, base+4, base+7)
-            else       -> listOf(base, base+4, base+7)
-        }.map { it.coerceIn(0, 127) }
+    private fun buildChordVoicing(root: Int, chordType: String): List<Int> {
+        val base = when (chordType) {
+            "Triad"  -> listOf(0, 4, 7)
+            "7th"    -> listOf(0, 4, 7, 10)
+            "9th"    -> listOf(0, 4, 7, 10, 14)
+            "11th"   -> listOf(0, 4, 7, 10, 14, 17)
+            "13th"   -> listOf(0, 4, 7, 10, 14, 17, 21)
+            "sus2"   -> listOf(0, 2, 7)
+            "sus4"   -> listOf(0, 5, 7)
+            "Power"  -> listOf(0, 7)
+            "add9"   -> listOf(0, 4, 7, 14)
+            "maj7"   -> listOf(0, 4, 7, 11)
+            "min7"   -> listOf(0, 3, 7, 10)
+            "dim7"   -> listOf(0, 3, 6, 9)
+            "aug"    -> listOf(0, 4, 8)
+            "hdim"   -> listOf(0, 3, 6, 10)
+            else     -> listOf(0, 4, 7)
+        }
+        return base.map { (root + it).coerceIn(0, 127) }
     }
 
-    fun sendNoteOn(note: Int, velocity: Int, channel: Int) {
+    // ─────────────────────────────────────────────────────────────────────────
+    // MIDI send helpers — FIX: were called but never defined
+    // ─────────────────────────────────────────────────────────────────────────
+
+    private fun sendNoteOn(note: Int, velocity: Int, channel: Int) {
+        val ch  = channel.coerceIn(0, 15)
         outputSender?.invoke(byteArrayOf(
-            (NOTE_ON or (channel and 0x0F)).toByte(),
-            note.toByte(),
-            velocity.toByte()
+            (NOTE_ON  or ch).toByte(),
+            note.coerceIn(0,127).toByte(),
+            velocity.coerceIn(0,127).toByte()
         ))
     }
 
-    fun sendNoteOff(note: Int, channel: Int) {
+    private fun sendNoteOff(note: Int, channel: Int) {
+        val ch  = channel.coerceIn(0, 15)
         outputSender?.invoke(byteArrayOf(
-            (NOTE_OFF or (channel and 0x0F)).toByte(),
-            note.toByte(),
-            0
+            (NOTE_OFF or ch).toByte(),
+            note.coerceIn(0,127).toByte(),
+            0x00
         ))
     }
 
-    fun sendCC(cc: Int, value: Int, channel: Int) {
+    private fun sendCC(cc: Int, value: Int, channel: Int) {
+        val ch  = channel.coerceIn(0, 15)
         outputSender?.invoke(byteArrayOf(
-            (0xB0 or (channel and 0x0F)).toByte(),
-            cc.toByte(),
-            value.toByte()
+            (0xB0 or ch).toByte(),
+            cc.coerceIn(0,127).toByte(),
+            value.coerceIn(0,127).toByte()
         ))
     }
 
-    fun sendPitchBend(value: Int, channel: Int) {
-        val lsb = (value and 0x7F).toByte()
-        val msb = ((value shr 7) and 0x7F).toByte()
-        outputSender?.invoke(byteArrayOf(
-            (0xE0 or (channel and 0x0F)).toByte(),
-            lsb, msb
-        ))
+    private fun sendPitchBend(value: Int, channel: Int) {
+        // value: 0..16383 (center = 8192)
+        val v   = value.coerceIn(0, 16383)
+        val lsb = (v and 0x7F).toByte()
+        val msb = ((v shr 7) and 0x7F).toByte()
+        val ch  = channel.coerceIn(0, 15)
+        outputSender?.invoke(byteArrayOf((0xE0 or ch).toByte(), lsb, msb))
     }
 }

@@ -35,7 +35,9 @@ fun ThemePickerDialog(
         text = {
             LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 items(ThemePresets.all) { preset ->
-                    val isSelected = preset.id == currentTheme.id
+                    // FIX: was using preset.id / currentTheme.id — ThemePreset has no id field.
+                    // Compare by name (guaranteed unique per spec).
+                    val isSelected = preset.name == currentTheme.name
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()

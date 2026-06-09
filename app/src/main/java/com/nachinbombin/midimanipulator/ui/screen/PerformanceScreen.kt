@@ -15,10 +15,11 @@ import androidx.compose.ui.graphics.*
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.*
-import com.nachinbombin.midimanipulator.midi.MidiManager
-import com.nachinbombin.midimanipulator.theme.ThemePreset
+import com.nachinbombin.midimanipulator.midi.MidiEngine
+import com.nachinbombin.midimanipulator.theme.ThemeManager
 import com.nachinbombin.midimanipulator.ui.component.*
 import com.nachinbombin.midimanipulator.viewmodel.AppViewModel
+import kotlin.math.*
 
 private val DIATONIC_SECTORS = listOf(
     JoystickSector("Root",  0f,   51.4f),
@@ -49,12 +50,15 @@ private val CHORD_SECTORS = listOf(
 
 private val STRUM_LABELS = listOf("Major", "Triad", "7th", "9th", "sus2", "sus4")
 
+// FIX: signature was (viewModel, midiManager: MidiManager, theme: ThemePreset) but
+// AppNavHost passes midiEngine (MidiEngine). Corrected to accept MidiEngine + ThemeManager.
 @Composable
 fun PerformanceScreen(
     viewModel: AppViewModel,
-    midiManager: MidiManager,
-    theme: ThemePreset
+    midiEngine: MidiEngine,
+    themeManager: ThemeManager
 ) {
+    val theme       = themeManager.currentTheme.collectAsState().value
     val analysis    by viewModel.analysis.collectAsState()
     val isLocked    by viewModel.isHardlocked.collectAsState()
     val isHold      by viewModel.isHoldActive.collectAsState()
@@ -69,13 +73,43 @@ fun PerformanceScreen(
     val modLocked   by viewModel.modLocked.collectAsState()
     val strumLocks  by viewModel.strumLocks.collectAsState()
 
+    // Sync portamento value from ViewModel → engine
+    LaunchedEffect(portamento) {
+        midiEngine.portamentoTime = (portamento * 127f).toInt().coerceIn(0, 127)
+    }
+    // Sync pitch bend (ViewModel stores 0..1; engine expects 0..16383)
+    LaunchedEffect(pitchBend) {
+        midiEngine.pitchBend = (pitchBend * 16383f).toInt().coerceIn(0, 16383)
+    }
+    // Sync mod wheel
+    LaunchedEffect(modValue) {
+        midiEngine.modValue = (modValue * 127f).toInt().coerceIn(0, 127)
+    }
+    // Poll engine analysis into ViewModel
+    LaunchedEffect(Unit) {
+        midiEngine.analysis.collect { viewModel.updateAnalysis(it) }
+    }
+
+    // Joystick 1 → melody voice
+    val j1Sector = sectorIndex(j1x, j1y, DIATONIC_SECTORS.size)
+    val j1Dist   = sqrt(j1x * j1x + j1y * j1y).coerceIn(0f, 1f)
+    LaunchedEffect(j1Sector, j1Dist) {
+        midiEngine.joystickMelodyUpdate(j1Sector, j1Dist)
+    }
+
+    // Joystick 2 → chord voice
+    val j2Sector  = sectorIndex(j2x, j2y, CHORD_SECTORS.size)
+    val j2Dist    = sqrt(j2x * j2x + j2y * j2y).coerceIn(0f, 1f)
+    val j2Label   = CHORD_SECTORS.getOrElse(j2Sector) { CHORD_SECTORS[0] }.label
+    LaunchedEffect(j2Sector, j2Dist) {
+        midiEngine.joystickChordUpdate(j2Label, j2Dist)
+    }
+
     Column(
         modifier = Modifier
             .fillMaxSize()
             .background(
-                Brush.verticalGradient(
-                    listOf(theme.bgVoices, theme.bg, theme.bg)
-                )
+                Brush.verticalGradient(listOf(theme.bgVoices, theme.bg, theme.bg))
             )
             .verticalScroll(rememberScrollState())
             .padding(12.dp),
@@ -111,9 +145,12 @@ fun PerformanceScreen(
                 bg = theme.bg, elevated = theme.bgElevated,
                 textPrimary = theme.textPrimary, textMuted = theme.textMuted,
                 sectors = DIATONIC_SECTORS,
-                activeSectorIndex = sectorIndex(j1x, j1y, DIATONIC_SECTORS.size),
+                activeSectorIndex = j1Sector,
                 onMove    = { x, y -> viewModel.updateJoystick1(x, y) },
-                onRelease = { viewModel.updateJoystick1(0f, 0f) },
+                onRelease = {
+                    viewModel.updateJoystick1(0f, 0f)
+                    midiEngine.joystickMelodyRelease()
+                },
                 modifier = Modifier.weight(1f)
             )
 
@@ -146,9 +183,12 @@ fun PerformanceScreen(
                 bg = theme.bg, elevated = theme.bgElevated,
                 textPrimary = theme.textPrimary, textMuted = theme.textMuted,
                 sectors = CHORD_SECTORS,
-                activeSectorIndex = sectorIndex(j2x, j2y, CHORD_SECTORS.size),
+                activeSectorIndex = j2Sector,
                 onMove    = { x, y -> viewModel.updateJoystick2(x, y) },
-                onRelease = { viewModel.updateJoystick2(0f, 0f) },
+                onRelease = {
+                    viewModel.updateJoystick2(0f, 0f)
+                    midiEngine.joystickChordRelease()
+                },
                 modifier = Modifier.weight(1f)
             )
         }
@@ -185,11 +225,10 @@ fun PerformanceScreen(
                             textPrimary = theme.textPrimary, textMuted = theme.textMuted,
                             locked    = strumLocks.getOrElse(idx) { false },
                             onLockToggle = { viewModel.toggleStrumLock(idx) },
-                            onNoteOn  = { ni, v -> midiManager.engine.strumNoteOn(idx, ni, v) },
-                            onNoteOff = { ni    -> midiManager.engine.strumNoteOff(idx, ni) },
+                            onNoteOn  = { ni, v -> midiEngine.strumNoteOn(idx, ni, v) },
+                            onNoteOff = { ni    -> midiEngine.strumNoteOff(idx, ni) },
                             modifier  = Modifier.weight(1f)
                         )
-                        // Lock icon
                         val lockColor by animateColorAsState(
                             targetValue = if (strumLocks.getOrElse(idx) { false })
                                 Color(0xFFFF4466) else theme.textMuted.copy(0.4f),
@@ -237,167 +276,121 @@ fun PerformanceScreen(
     }
 }
 
-// ── Header Bar ───────────────────────────────────────────────────────────────
+// ─── Helpers ─────────────────────────────────────────────────────────────────
+
+fun sectorIndex(x: Float, y: Float, count: Int): Int {
+    if (count == 0) return 0
+    val angle = (Math.toDegrees(atan2(y.toDouble(), x.toDouble())) + 90.0 + 360.0) % 360.0
+    return ((angle / 360.0) * count).toInt().coerceIn(0, count - 1)
+}
+
+// ─── Sub-composables ─────────────────────────────────────────────────────────
+
 @Composable
-private fun HeaderBar(analysis: com.nachinbombin.midimanipulator.midi.MidiAnalysis, theme: ThemePreset) {
+private fun HeaderBar(
+    analysis: com.nachinbombin.midimanipulator.midi.MidiAnalysis,
+    theme: com.nachinbombin.midimanipulator.theme.ThemePreset
+) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(12.dp))
-            .background(
-                Brush.horizontalGradient(
-                    listOf(theme.bgElevated, theme.bgVoices, theme.bgElevated)
-                )
-            )
-            .border(1.dp, Brush.horizontalGradient(listOf(
-                theme.accent.copy(0.3f), theme.accentSoft.copy(0.15f), theme.accent.copy(0.3f)
-            )), RoundedCornerShape(12.dp))
-            .padding(horizontal = 16.dp, vertical = 10.dp),
-        horizontalArrangement = Arrangement.SpaceEvenly
+            .background(Color(theme.bgElevated.value), RoundedCornerShape(10.dp))
+            .padding(horizontal = 14.dp, vertical = 8.dp),
+        horizontalArrangement = Arrangement.SpaceBetween
     ) {
-        HeaderItem("NOTE",  analysis.lastNoteName, theme)
-        HeaderDivider(theme)
-        HeaderItem("ROOT",  analysis.rootNoteName,  theme)
-        HeaderDivider(theme)
-        HeaderItem("SCALE", analysis.scaleName,     theme)
-        HeaderDivider(theme)
-        HeaderItem("CHORD", analysis.chordContext,  theme)
+        HeaderCell("NOTE",  analysis.lastNoteName, theme)
+        HeaderCell("ROOT",  analysis.rootNoteName, theme)
+        HeaderCell("SCALE", analysis.scaleName,    theme)
+        HeaderCell("CHORD", analysis.chordContext,  theme)
     }
 }
 
 @Composable
-private fun HeaderItem(label: String, value: String, theme: ThemePreset) {
+private fun HeaderCell(label: String, value: String, theme: com.nachinbombin.midimanipulator.theme.ThemePreset) {
     Column(horizontalAlignment = Alignment.CenterHorizontally) {
-        Text(label, color = theme.textMuted, fontSize = 8.sp,
-            fontWeight = FontWeight.Bold, letterSpacing = 1.sp)
-        Text(value, color = theme.accent, fontSize = 16.sp, fontWeight = FontWeight.Bold)
+        Text(label, color = theme.textMuted, fontSize = 8.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.sp)
+        Text(value, color = theme.accent,    fontSize = 13.sp, fontWeight = FontWeight.Bold)
     }
 }
 
-@Composable
-private fun HeaderDivider(theme: ThemePreset) {
-    Box(
-        modifier = Modifier
-            .width(1.dp)
-            .height(32.dp)
-            .background(
-                Brush.verticalGradient(
-                    listOf(Color.Transparent, theme.borderSubtle, Color.Transparent)
-                )
-            )
-    )
-}
-
-// ── Reference Controls ────────────────────────────────────────────────────────
 @Composable
 private fun ReferenceControls(
-    isLocked: Boolean, isHold: Boolean, theme: ThemePreset,
-    onSelect: () -> Unit, onHold: () -> Unit
+    isLocked: Boolean,
+    isHold: Boolean,
+    theme: com.nachinbombin.midimanipulator.theme.ThemePreset,
+    onSelect: () -> Unit,
+    onHold: () -> Unit
 ) {
     Row(
         modifier = Modifier.fillMaxWidth(),
         horizontalArrangement = Arrangement.spacedBy(8.dp)
     ) {
         GlowButton(
-            label = "SELECT NOTE", active = isLocked && !isHold,
-            accent = theme.accent, accentSoft = theme.accentSoft,
-            bg = theme.bg, elevated = theme.bgElevated, textPrimary = theme.textPrimary,
-            onClick = onSelect, modifier = Modifier.weight(1f)
+            label    = "SELECT NOTE",
+            active   = isLocked && !isHold,
+            accent   = theme.accent,
+            accentSoft = theme.accentSoft,
+            bg       = theme.bg,
+            elevated = theme.bgElevated,
+            textPrimary = theme.textPrimary,
+            onClick  = onSelect,
+            modifier = Modifier.weight(1f).height(44.dp)
         )
         GlowButton(
-            label = "HOLD NOTE", active = isHold,
-            accent = theme.accentAlt, accentSoft = theme.accent,
-            bg = theme.bg, elevated = theme.bgElevated, textPrimary = theme.textPrimary,
-            onClick = onHold, modifier = Modifier.weight(1f)
+            label    = "HOLD NOTE",
+            active   = isHold,
+            accent   = theme.accent,
+            accentSoft = theme.accentSoft,
+            bg       = theme.bg,
+            elevated = theme.bgElevated,
+            textPrimary = theme.textPrimary,
+            onClick  = onHold,
+            modifier = Modifier.weight(1f).height(44.dp)
         )
     }
 }
 
-// ── Wheel Control (Pitch / Mod) ────────────────────────────────────────────────
 @Composable
 private fun WheelControl(
-    label: String, value: Float, locked: Boolean, theme: ThemePreset,
-    onValueChange: (Float) -> Unit, onLockToggle: () -> Unit, modifier: Modifier
+    label: String,
+    value: Float,
+    locked: Boolean,
+    theme: com.nachinbombin.midimanipulator.theme.ThemePreset,
+    onValueChange: (Float) -> Unit,
+    onLockToggle: () -> Unit,
+    modifier: Modifier = Modifier
 ) {
     Column(
-        horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.spacedBy(4.dp),
         modifier = modifier
+            .background(Color(theme.bgElevated.value), RoundedCornerShape(10.dp))
+            .padding(8.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(4.dp)
     ) {
         Row(
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(6.dp)
+            Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
         ) {
-            Text(label, color = theme.textMuted, fontSize = 9.sp,
-                fontWeight = FontWeight.Bold, letterSpacing = 1.sp)
+            Text(label, color = theme.textMuted, fontSize = 9.sp, fontWeight = FontWeight.Bold, letterSpacing = 0.8.sp)
             val lockColor by animateColorAsState(
-                targetValue = if (locked) Color(0xFFFF4466) else theme.textMuted.copy(0.4f),
+                targetValue = if (locked) Color(0xFFFF4466) else theme.textMuted.copy(0.5f),
                 animationSpec = tween(200), label = "wlc"
             )
             Box(
-                modifier = Modifier
-                    .size(18.dp)
-                    .clip(RoundedCornerShape(4.dp))
-                    .background(lockColor.copy(0.15f))
+                Modifier.size(22.dp).clip(RoundedCornerShape(5.dp))
+                    .background(lockColor.copy(0.12f))
                     .clickable { onLockToggle() },
                 contentAlignment = Alignment.Center
-            ) {
-                Text("\uD83D\uDD12", fontSize = 8.sp)
-            }
+            ) { Text("\uD83D\uDD12", fontSize = 10.sp) }
         }
         VerticalSlider(
-            value    = value, locked = locked,
+            value    = value,
             accent   = theme.accent, accentSoft = theme.accentSoft,
-            bg       = theme.bg, elevated = theme.bgElevated, textMuted = theme.textMuted,
-            width    = 44.dp, height = 88.dp,
-            onValueChange  = onValueChange
+            bg       = theme.bg, elevated = theme.bgElevated,
+            textMuted= theme.textMuted,
+            height   = 80.dp,
+            onValueChange = if (locked) ({}) else onValueChange
         )
     }
-}
-
-// ── Glow Card ────────────────────────────────────────────────────────────────
-@Composable
-fun GlowCard(theme: ThemePreset, content: @Composable () -> Unit) {
-    Box(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clip(RoundedCornerShape(14.dp))
-            .drawBehind {
-                // Subtle outer glow
-                drawRoundRect(
-                    brush = Brush.verticalGradient(
-                        listOf(
-                            theme.accent.copy(0.06f),
-                            theme.accentSoft.copy(0.03f),
-                            Color.Transparent
-                        )
-                    ),
-                    cornerRadius = CornerRadius(42f)
-                )
-            }
-            .background(
-                Brush.verticalGradient(
-                    listOf(theme.bgElevated.copy(0.97f), theme.bg.copy(0.95f))
-                )
-            )
-            .border(
-                1.dp,
-                Brush.linearGradient(
-                    listOf(
-                        theme.accent.copy(0.25f),
-                        theme.borderSubtle.copy(0.5f),
-                        theme.accentSoft.copy(0.15f)
-                    )
-                ),
-                RoundedCornerShape(14.dp)
-            )
-    ) {
-        content()
-    }
-}
-
-private fun sectorIndex(x: Float, y: Float, count: Int): Int {
-    if (x == 0f && y == 0f) return -1
-    val angleDeg = (Math.toDegrees(Math.atan2(y.toDouble(), x.toDouble())).toFloat() + 360f) % 360f
-    return ((angleDeg / 360f) * count).toInt().coerceIn(0, count - 1)
 }

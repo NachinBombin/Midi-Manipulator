@@ -24,10 +24,15 @@ fun RoutingScreen(midiManager: MidiManager, themeManager: ThemeManager) {
     val theme   = themeManager.currentTheme.collectAsState().value
     val ports   by midiManager.ports.collectAsState()
     val log     by midiManager.activityLog.collectAsState()
-    val inputs  = ports.filter { !it.isInput }
-    val outputs = ports.filter { it.isInput }
-    var selIn   by remember { mutableStateOf<MidiPortInfo?>(null) }
-    var selOut  by remember { mutableStateOf<MidiPortInfo?>(null) }
+    // FIX: was inverted — isInput=false was labelled as INPUTS and vice versa.
+    // MidiPortInfo.isInput=true means the device has an input port (app writes to it as output).
+    // MidiPortInfo.isInput=false means the device has an output port (app reads from it as input).
+    // For user-facing labels: "SOURCES" = device output ports we listen to (isInput=false)
+    //                         "DESTINATIONS" = device input ports we send to (isInput=true)
+    val sources      = ports.filter { !it.isInput }   // device output ports → app reads
+    val destinations = ports.filter { it.isInput }    // device input ports  → app writes
+    var selSource by remember { mutableStateOf<MidiPortInfo?>(null) }
+    var selDest   by remember { mutableStateOf<MidiPortInfo?>(null) }
 
     Column(
         Modifier.fillMaxSize().background(Color(theme.bg.value)).padding(12.dp),
@@ -36,12 +41,18 @@ fun RoutingScreen(midiManager: MidiManager, themeManager: ThemeManager) {
         Text("MIDI ROUTING", color = Color(theme.accent.value), fontSize = 13.sp)
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             Column(Modifier.weight(1f)) {
-                SectionLabel("INPUTS", theme)
-                PortList(inputs, selIn, theme) { p -> selIn = p; midiManager.connectInput(p) }
+                SectionLabel("SOURCES (from device)", theme)
+                PortList(sources, selSource, theme) { p ->
+                    selSource = p
+                    midiManager.connectInput(p)   // open device output port to receive from it
+                }
             }
             Column(Modifier.weight(1f)) {
-                SectionLabel("OUTPUTS", theme)
-                PortList(outputs, selOut, theme) { p -> selOut = p; midiManager.connectOutput(p) }
+                SectionLabel("DESTINATIONS (to device)", theme)
+                PortList(destinations, selDest, theme) { p ->
+                    selDest = p
+                    midiManager.connectOutput(p)  // open device input port to send to it
+                }
             }
         }
         Box(
@@ -56,30 +67,47 @@ fun RoutingScreen(midiManager: MidiManager, themeManager: ThemeManager) {
             Modifier.fillMaxWidth().weight(1f)
                 .background(Color(theme.bgElevated.value), RoundedCornerShape(8.dp)).padding(8.dp)
         ) {
-            items(log.take(60)) { Text(it, color = Color(theme.textMuted.value), fontSize = 10.sp, lineHeight = 14.sp) }
+            items(log.take(60)) {
+                Text(it, color = Color(theme.textMuted.value), fontSize = 10.sp, lineHeight = 14.sp)
+            }
         }
     }
 }
 
 @Composable
 private fun SectionLabel(text: String, theme: ThemePreset) {
-    Text(text, color = Color(theme.textMuted.value), fontSize = 10.sp, modifier = Modifier.padding(bottom = 4.dp))
+    Text(text, color = Color(theme.textMuted.value), fontSize = 10.sp,
+        modifier = Modifier.padding(bottom = 4.dp))
 }
 
 @Composable
-private fun PortList(ports: List<MidiPortInfo>, selected: MidiPortInfo?, theme: ThemePreset, onSelect: (MidiPortInfo) -> Unit) {
+private fun PortList(
+    ports: List<MidiPortInfo>,
+    selected: MidiPortInfo?,
+    theme: ThemePreset,
+    onSelect: (MidiPortInfo) -> Unit
+) {
     Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-        if (ports.isEmpty()) Text("No devices", color = Color(theme.textMuted.value), fontSize = 10.sp)
+        if (ports.isEmpty()) {
+            Text("No devices", color = Color(theme.textMuted.value), fontSize = 10.sp)
+        }
         ports.forEach { port ->
             val isSel = port == selected
             Box(
                 Modifier.fillMaxWidth()
-                    .background(if (isSel) Color(theme.accent.value) else Color(theme.bgElevated.value), RoundedCornerShape(6.dp))
+                    .background(
+                        if (isSel) Color(theme.accent.value) else Color(theme.bgElevated.value),
+                        RoundedCornerShape(6.dp)
+                    )
                     .border(1.dp, Color(theme.borderSubtle.value), RoundedCornerShape(6.dp))
                     .clickable { onSelect(port) }
                     .padding(horizontal = 10.dp, vertical = 6.dp)
             ) {
-                Text(port.name, color = if (isSel) Color(theme.bg.value) else Color(theme.textPrimary.value), fontSize = 11.sp)
+                Text(
+                    port.name,
+                    color = if (isSel) Color(theme.bg.value) else Color(theme.textPrimary.value),
+                    fontSize = 11.sp
+                )
             }
         }
     }

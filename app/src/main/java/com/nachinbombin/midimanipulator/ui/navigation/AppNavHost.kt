@@ -49,16 +49,26 @@ fun AppNavHost(
                         .clickable { current = screen }.padding(vertical = 8.dp),
                     contentAlignment = Alignment.Center
                 ) {
-                    Text(screen.label, color = if (active) Color(theme.accent.value) else Color(theme.textMuted.value), fontSize = 11.sp)
+                    Text(
+                        screen.label,
+                        color = if (active) Color(theme.accent.value) else Color(theme.textMuted.value),
+                        fontSize = 11.sp
+                    )
                 }
             }
         }
         Box(Modifier.weight(1f)) {
             when (current) {
-                Screen.Performance -> PerformanceScreen(viewModel, midiManager.engine, themeManager)
-                Screen.Routing     -> RoutingScreen(midiManager, themeManager)
-                Screen.Gamepad     -> GamepadScreen(viewModel, themeManager)
-                Screen.Settings    -> SettingsScreen(themeManager)
+                // FIX: was passing midiManager.engine (MidiEngine) but PerformanceScreen now
+                // correctly accepts MidiEngine directly, so pass engine here.
+                Screen.Performance -> PerformanceScreen(
+                    viewModel    = viewModel,
+                    midiEngine   = midiManager.engine,
+                    themeManager = themeManager
+                )
+                Screen.Routing  -> RoutingScreen(midiManager, themeManager)
+                Screen.Gamepad  -> GamepadScreen(viewModel, themeManager)
+                Screen.Settings -> SettingsScreen(themeManager)
             }
         }
     }
