@@ -1,22 +1,28 @@
 package com.nachinbombin.midimanipulator.viewmodel
 
-import androidx.lifecycle.ViewModel
+import android.app.Application
+import android.content.Context
+import androidx.lifecycle.AndroidViewModel
 import com.nachinbombin.midimanipulator.midi.MidiAnalysis
 import com.nachinbombin.midimanipulator.midi.MidiEngine
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import org.json.JSONObject
 
 data class GamepadMapping(
     val deviceDescriptor: String,
     val mappings: Map<String, String> = emptyMap()
 )
 
-class AppViewModel : ViewModel() {
+class AppViewModel(app: Application) : AndroidViewModel(app) {
+
+    private val prefs = app.getSharedPreferences("gamepad_prefs", Context.MODE_PRIVATE)
 
     /**
-     * Injected after MidiManager is created (in MainActivity setContent).
-     * Used so clearHardlock() can stop the engine drone and release notes.
+     * Injected after MidiManager is created in MainActivity.
+     * @Volatile so changes on the main thread are visible on the MIDI thread.
      */
+    @Volatile
     var engineRef: MidiEngine? = null
 
     // ─── MIDI analysis ───────────────────────────────────────────────────────
@@ -41,14 +47,14 @@ class AppViewModel : ViewModel() {
         _isHardlocked.value   = true
         _isHoldActive.value   = hold
         engineRef?.hardlock(note)
+        if (hold) {
+            // Start drone with current gate/rhythm values
+            engineRef?.startDrone(_gateLength.value, _rhythmPattern.value)
+        }
     }
 
-    /**
-     * FIX: previously did not notify engine — any active drone note stayed on forever.
-     * Now calls engine.unlock() which stops all harmony voices before clearing state.
-     */
     fun clearHardlock() {
-        engineRef?.unlock()
+        engineRef?.unlock()   // stops drone and releases all notes
         _isHardlocked.value   = false
         _isHoldActive.value   = false
         _hardlockedNote.value = -1
@@ -82,10 +88,6 @@ class AppViewModel : ViewModel() {
 
     // ─── Pitch Bend ──────────────────────────────────────────────────────────
 
-    /**
-     * FIX: initial value 0.5f correctly maps to engine center (8192).
-     * LaunchedEffect in PerformanceScreen syncs this on first launch.
-     */
     private val _pitchBend       = MutableStateFlow(0.5f)
     val pitchBend: StateFlow<Float> = _pitchBend
 
@@ -103,7 +105,6 @@ class AppViewModel : ViewModel() {
     private val _modLocked = MutableStateFlow(false)
     val modLocked: StateFlow<Boolean> = _modLocked
 
-    /** FIX: guard added — locked mod wheel must not accept new values. */
     fun setMod(v: Float)   { if (!_modLocked.value) _modValue.value = v }
     fun toggleModLock()    { _modLocked.value = !_modLocked.value }
 
@@ -115,8 +116,16 @@ class AppViewModel : ViewModel() {
     private val _rhythmPattern = MutableStateFlow("Quarter")
     val rhythmPattern: StateFlow<String> = _rhythmPattern
 
-    fun setGate(v: Float)    { _gateLength.value = v }
-    fun setRhythm(r: String) { _rhythmPattern.value = r }
+    fun setGate(v: Float) {
+        _gateLength.value = v
+        // If drone is active, restart it with the new gate ratio
+        if (_isHoldActive.value) engineRef?.startDrone(v, _rhythmPattern.value)
+    }
+
+    fun setRhythm(r: String) {
+        _rhythmPattern.value = r
+        if (_isHoldActive.value) engineRef?.startDrone(_gateLength.value, r)
+    }
 
     // ─── Strum locks ─────────────────────────────────────────────────────────
 
@@ -127,9 +136,11 @@ class AppViewModel : ViewModel() {
         _strumLocks.value = _strumLocks.value.toMutableList().also { it[index] = !it[index] }
     }
 
-    // ─── Gamepad ─────────────────────────────────────────────────────────────
+    // ─── Gamepad — persisted to SharedPreferences ────────────────────────────
 
-    private val _gamepadMappings      = MutableStateFlow<Map<String, GamepadMapping>>(emptyMap())
+    private val _gamepadMappings = MutableStateFlow<Map<String, GamepadMapping>>(
+        loadSavedMappings()
+    )
     val gamepadMappings: StateFlow<Map<String, GamepadMapping>> = _gamepadMappings
 
     private val _testModeActive       = MutableStateFlow(false)
@@ -139,9 +150,39 @@ class AppViewModel : ViewModel() {
     val lastTriggeredControl: StateFlow<String> = _lastTriggeredControl
 
     fun setGamepadMapping(descriptor: String, mapping: GamepadMapping) {
-        _gamepadMappings.value = _gamepadMappings.value.toMutableMap().also { it[descriptor] = mapping }
+        _gamepadMappings.value = _gamepadMappings.value.toMutableMap()
+            .also { it[descriptor] = mapping }
+        // Persist to SharedPreferences
+        prefs.edit().putString("gp_$descriptor", serializeMappingJson(mapping.mappings)).apply()
     }
 
     fun setTestMode(active: Boolean)      { _testModeActive.value = active }
     fun setLastTriggered(control: String) { _lastTriggeredControl.value = control }
+
+    // ─── Persistence helpers ─────────────────────────────────────────────────
+
+    private fun loadSavedMappings(): Map<String, GamepadMapping> {
+        return prefs.all.entries
+            .filter { it.key.startsWith("gp_") }
+            .associate { entry ->
+                val descriptor = entry.key.removePrefix("gp_")
+                val json = entry.value as? String ?: "{}"
+                descriptor to GamepadMapping(descriptor, deserializeMappingJson(json))
+            }
+    }
+
+    private fun serializeMappingJson(mappings: Map<String, String>): String {
+        val obj = JSONObject()
+        mappings.forEach { (k, v) -> obj.put(k, v) }
+        return obj.toString()
+    }
+
+    private fun deserializeMappingJson(json: String): Map<String, String> {
+        return try {
+            val obj = JSONObject(json)
+            obj.keys().asSequence().associate { key -> key to obj.getString(key) }
+        } catch (_: Exception) {
+            emptyMap()
+        }
+    }
 }

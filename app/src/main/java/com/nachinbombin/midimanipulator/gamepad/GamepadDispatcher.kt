@@ -77,12 +77,11 @@ class GamepadDispatcher(
                 if (isActive) viewModel.setActiveChord(target.removePrefix("Chord: "))
             }
 
-            // FIX: Strum branch was a stub. Now resolves strip index and dispatches
-            // to engine using norm01 (0..1) as a position across the strip's notes.
             target.startsWith("Strum ") -> {
                 val stripStr  = target.removePrefix("Strum ").trim()
-                val stripIdx  = (stripStr.toIntOrNull() ?: 1) - 1   // "Strum 1" → index 0
-                val noteIndex = (norm01 * 11f).toInt().coerceIn(0, 11)
+                val stripIdx  = (stripStr.toIntOrNull() ?: 1) - 1
+                // FIX: coerceIn(0,11) prevents out-of-bounds on exact 1.0f
+                val noteIndex = (norm01 * 11.99f).toInt().coerceIn(0, 11)
                 if (isActive) {
                     val vel = (abs(norm) * 127f).toInt().coerceIn(20, 127)
                     midiEngine.strumNoteOn(stripIdx, noteIndex, vel)
@@ -115,6 +114,10 @@ class GamepadDispatcher(
         }
     }
 
+    /**
+     * FIX: KEYCODE_BUTTON_THUMBL/R are physical stick-press buttons.
+     * Corrected labels from "LStick X" / "RStick X" to "LStick Press" / "RStick Press".
+     */
     private fun keyCodeToLabel(keyCode: Int): String? = when (keyCode) {
         KeyEvent.KEYCODE_BUTTON_A      -> "A"
         KeyEvent.KEYCODE_BUTTON_B      -> "B"
@@ -128,8 +131,8 @@ class GamepadDispatcher(
         KeyEvent.KEYCODE_DPAD_DOWN     -> "D-Down"
         KeyEvent.KEYCODE_DPAD_LEFT     -> "D-Left"
         KeyEvent.KEYCODE_DPAD_RIGHT    -> "D-Right"
-        KeyEvent.KEYCODE_BUTTON_THUMBL -> "LStick X"
-        KeyEvent.KEYCODE_BUTTON_THUMBR -> "RStick X"
+        KeyEvent.KEYCODE_BUTTON_THUMBL -> "LStick Press"
+        KeyEvent.KEYCODE_BUTTON_THUMBR -> "RStick Press"
         else -> null
     }
 }
